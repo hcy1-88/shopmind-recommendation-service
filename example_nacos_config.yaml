@@ -1,0 +1,24 @@
+# ==================== Nacos 配置中心示例 ====================
+# Data ID: shopmind-ai-service.yaml
+# Group: DEFAULT_GROUP
+# 配置格式: YAML
+
+# Milvus 向量数据库配置
+milvus:
+  host: localhost # Milvus 服务器地址
+  port: 19530 # Milvus 端口（默认 19530）
+  db_name: shopmind # 数据库名称
+  token: root:Milvus # 认证 token（格式：username:password）
+
+# Embedding 模型配置（如需使用兴趣向量生成）
+embedding:
+  model_name: text-embedding-v3
+  api_key: your_api_key_here
+  dimension: 768
+# ==================== 说明 ====================
+# 1. 确保 Milvus 中已创建 shopmind 数据库
+# 2. 确保 product_collection 集合已存在并包含商品向量数据
+# 3. 集合字段：
+#    - product_id: INT64 (主键)
+#    - embedding: FLOAT_VECTOR (维度应与 embedding.dimension 一致)
+

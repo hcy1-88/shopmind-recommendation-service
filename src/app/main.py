@@ -161,7 +161,8 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 
 # Include routers
-# app.include_router(ai_product_router.router)
+from app.api import recommendation_router
+app.include_router(recommendation_router.router)
 
 
 # Root endpoint

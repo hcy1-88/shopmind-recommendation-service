@@ -7,13 +7,16 @@ dependencies = [
     "colorlog>=6.10.1",
     "dashscope>=1.25.5",
     "fastapi>=0.128.0",
+    "httpx>=0.27.0",
     "langchain>=1.2.0",
     "langchain-community>=0.4.1",
     "nacos-sdk-python>=3.0.2",
+    "numpy>=1.26.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
     "pymilvus>=2.6.6",
     "python-dotenv>=1.2.1",
+    "tenacity>=8.2.0",
     "uvicorn[standard]>=0.40.0",
 ]
 
