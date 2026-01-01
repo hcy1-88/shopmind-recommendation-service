@@ -15,6 +15,7 @@ from app.schemas.page_result_schema import PageResult
 from app.services.embedding_service import get_embedding_service
 from app.store.product_collection import get_collection
 from app.utils.logger import app_logger as logger
+from app.config.nacos_client import get_nacos_client
 
 
 class RecommendationService:
@@ -26,12 +27,13 @@ class RecommendationService:
         self.user_client = get_user_service_client()
         self.product_client = get_product_service_client()
         self.embedding_service = get_embedding_service()
+        self.nacos_client = get_nacos_client()
         self.min_behavior_count = 3  # 使用行为推荐的最少行为数, 默认 3
         self.user_behavior_history = 30  # 考虑的用户行为历史天数，默认 30 天的行为历史
 
 
     def _initialize(self):
-        self.config = get_recommendation_service()
+        self.config = self.nacos_client.get_recommendation_config()
         self.min_behavior_count = self.config["min_behavior_count"]
         self.user_behavior_history = self.config["user_behavior_history"]
 
@@ -317,7 +319,7 @@ class RecommendationService:
             )
             return None
 
-    async def _get_user_vector_from_keywords(self, keywords: List[str]) -> Optional[np.ndarray]:
+    async def _get_user_vector_from_keywords(self, keywords: list[str]) -> Optional[np.ndarray]:
         """
         根据用户搜索关键词生成用户向量.
 
@@ -380,8 +382,8 @@ class RecommendationService:
 
             # 构建搜索参数
             search_params = {
-                "metric_type": "IP",  # 内积相似度（假设向量已归一化）
-                "params": {"nprobe": 10}
+                "metric_type": "COSINE",
+                "params": {"ef": 64}
             }
 
             # 执行搜索
@@ -457,8 +459,8 @@ class RecommendationService:
             collection.load()
 
             search_params = {
-                "metric_type": "IP",  # 内积相似度
-                "params": {"nprobe": 10}
+                "metric_type": "COSINE",
+                "params": {"ef": 64}
             }
 
             results = collection.search(

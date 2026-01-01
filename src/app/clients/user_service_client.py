@@ -7,6 +7,7 @@
 """
 from typing import List, Optional, Dict
 import httpx
+from envs.my_llm.Lib.http.client import HTTPException
 
 from app.clients.service_discovery import get_user_service_url
 from app.schemas.user_service_schema import UserInterestsResponseDTO, UserBehaviorRequest, UserBehaviorResponseDTO
@@ -46,16 +47,12 @@ class UserServiceClient:
         Returns:
             用户兴趣DTO，如果失败返回 None
         """
-        trace_id = get_trace_id()
         try:
             base_url = await self._get_base_url()
             url = f"{base_url}/user/interests"
             headers = self._get_headers()
 
-            logger.info(
-                f"调用用户服务获取兴趣: user_id={user_id}, url={url}",
-                extra={"trace_id": trace_id, "user_id": user_id, "url": url}
-            )
+            logger.info(f"调用用户服务获取兴趣: user_id={user_id}, url={url}",)
 
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(url, params={"userId": user_id}, headers=headers)
@@ -67,30 +64,22 @@ class UserServiceClient:
 
                 if result.success and result.data:
                     logger.info(
-                        f"获取用户兴趣成功: user_id={user_id}, interests={result.data.interests}",
-                        extra={"trace_id": trace_id, "user_id": user_id}
-                    )
+                        f"获取用户兴趣成功: user_id={user_id}, interests={result.data.interests}")
                     return result.data
                 else:
-                    logger.warning(
-                        f"获取用户兴趣失败: user_id={user_id}, message={result.message}",
-                        extra={"trace_id": trace_id, "user_id": user_id}
-                    )
-                    return None
+                    logger.error(
+                        f"获取用户兴趣失败: url={url}, user_id={user_id}, message={result.message}")
+                    raise HTTPException("获取用户兴趣失败")
 
         except httpx.TimeoutException:
-            logger.error(
-                f"获取用户兴趣超时: user_id={user_id}",
-                extra={"trace_id": trace_id, "user_id": user_id}
-            )
-            return None
+            logger.error(f"获取用户兴趣超时: user_id={user_id}")
+            raise
         except Exception as e:
             logger.error(
                 f"获取用户兴趣异常: user_id={user_id}, error={str(e)}",
-                extra={"trace_id": trace_id, "user_id": user_id},
                 exc_info=True
             )
-            return None
+            raise
 
     async def get_user_behaviors(
         self,
@@ -111,7 +100,6 @@ class UserServiceClient:
         Returns:
             用户行为列表，如果失败返回空列表
         """
-        trace_id = get_trace_id()
         try:
             base_url = await self._get_base_url()
             url = f"{base_url}/behavior/{user_id}"
@@ -124,10 +112,7 @@ class UserServiceClient:
                 target_type=target_type
             )
 
-            logger.info(
-                f"调用用户服务获取行为历史: user_id={user_id}, day={day}, target_type={target_type}",
-                extra={"trace_id": trace_id, "user_id": user_id}
-            )
+            logger.info(f"调用用户服务获取行为历史: user_id={user_id}, day={day}, target_type={target_type}",)
 
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
@@ -136,30 +121,25 @@ class UserServiceClient:
                     headers=headers
                 )
                 response.raise_for_status()
-
-                # 直接返回 List[UserBehaviorResponseDTO]（无 ResultContext 包裹）
-                behaviors_data = response.json()
-                behaviors = [UserBehaviorResponseDTO(**item) for item in behaviors_data]
-
-                logger.info(
-                    f"获取用户行为历史成功: user_id={user_id}, count={len(behaviors)}",
-                    extra={"trace_id": trace_id, "user_id": user_id, "count": len(behaviors)}
-                )
-                return behaviors
-
+                jj = response.json()
+                print(jj)
+                behaviors_result_context = ResultContext[list[UserBehaviorResponseDTO]](**jj)
+                if behaviors_result_context.success:
+                    behaviors = behaviors_result_context.data
+                    logger.info(f"获取用户行为历史成功: user_id={user_id}, count={len(behaviors)}")
+                    return behaviors
+                else:
+                    logger.error(f"获取用户行为失败！url={url} , request={request_body.model_dump()}")
+                    raise HTTPException("用户服务获取用户行为异常！")
         except httpx.TimeoutException:
-            logger.error(
-                f"获取用户行为历史超时: user_id={user_id}",
-                extra={"trace_id": trace_id, "user_id": user_id}
-            )
-            return []
+            logger.error(f"获取用户行为历史超时: user_id={user_id}")
+            raise
         except Exception as e:
             logger.error(
                 f"获取用户行为历史异常: user_id={user_id}, error={str(e)}",
-                extra={"trace_id": trace_id, "user_id": user_id},
                 exc_info=True
             )
-            return []
+            raise
 
     async def get_product_behaviors(self, user_id: int, day: int = 30) -> List[int]:
         """
@@ -205,7 +185,6 @@ class UserServiceClient:
         Returns:
             搜索关键词列表（去重后，按时间倒序）
         """
-        trace_id = get_trace_id()
         try:
             behaviors = await self.get_user_behaviors(
                 user_id=user_id,
@@ -223,16 +202,12 @@ class UserServiceClient:
                         keywords.append(keyword)
                         seen.add(keyword)
 
-            logger.info(
-                f"提取用户搜索关键词: user_id={user_id}, keyword_count={len(keywords)}",
-                extra={"trace_id": trace_id, "user_id": user_id, "count": len(keywords)}
-            )
+            logger.info(f"提取用户搜索关键词: user_id={user_id}, keyword_count={len(keywords)}",)
             return keywords
 
         except Exception as e:
             logger.error(
                 f"获取搜索关键词异常: user_id={user_id}, error={str(e)}",
-                extra={"trace_id": trace_id, "user_id": user_id},
                 exc_info=True
             )
             return []

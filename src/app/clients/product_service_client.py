@@ -10,6 +10,7 @@ import httpx
 
 from app.clients.service_discovery import get_product_service_url
 from app.schemas.product_service_schema import ProductResponseDto, ProductGettingRequestDTO
+from app.schemas.result_context import ResultContext
 from app.utils.logger import app_logger as logger
 from app.utils.trace_context import get_trace_id, TRACE_ID_HEADER
 
@@ -48,7 +49,6 @@ class ProductServiceClient:
         if not product_ids:
             return []
 
-        trace_id = get_trace_id()
         try:
             base_url = await self._get_base_url()
             url = f"{base_url}/products/ids"
@@ -56,10 +56,7 @@ class ProductServiceClient:
 
             request_body = ProductGettingRequestDTO(ids=product_ids)
 
-            logger.info(
-                f"调用商品服务批量获取商品: product_ids={product_ids[:10]}..., count={len(product_ids)}",
-                extra={"trace_id": trace_id, "count": len(product_ids)}
-            )
+            logger.info(f"调用商品服务批量获取商品: product_ids={product_ids[:10]}..., count={len(product_ids)}")
 
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
@@ -69,29 +66,30 @@ class ProductServiceClient:
                 )
                 response.raise_for_status()
 
-                # 直接返回 List[ProductResponseDto]（无 ResultContext 包裹）
-                products_data = response.json()
-                products = [ProductResponseDto(**item) for item in products_data]
+                jj = response.json()
+                print(jj)
 
-                logger.info(
-                    f"批量获取商品成功: requested={len(product_ids)}, returned={len(products)}",
-                    extra={"trace_id": trace_id, "requested": len(product_ids), "returned": len(products)}
-                )
-                return products
+                products_result_context = ResultContext[list[ProductResponseDto]](**jj)
 
+                if products_result_context.success:
+                    products = products_result_context.data
+                    logger.info(
+                        f"批量获取商品成功: requested={len(product_ids)}, returned={len(products)}",
+                        extra={"requested": len(product_ids), "returned": len(products)}
+                    )
+                    return products
+                else:
+                    logger.error(f"请求商品商品失败！url: {url}, request:{request_body.model_dump()}")
+                    raise httpx.HTTPError("商品服务异常！")
         except httpx.TimeoutException:
-            logger.error(
-                f"批量获取商品超时: product_ids={product_ids[:10]}",
-                extra={"trace_id": trace_id}
-            )
-            return []
+            logger.error(f"批量获取商品超时: product_ids={product_ids[:10]}")
+            raise
         except Exception as e:
             logger.error(
                 f"批量获取商品异常: error={str(e)}",
-                extra={"trace_id": trace_id},
                 exc_info=True
             )
-            return []
+            raise
 
     async def get_hot_products(self, limit: int = 10) -> List[ProductResponseDto]:
         """
@@ -103,44 +101,30 @@ class ProductServiceClient:
         Returns:
             热门商品列表，如果失败返回空列表
         """
-        trace_id = get_trace_id()
         try:
             base_url = await self._get_base_url()
             url = f"{base_url}/products/hot"
             headers = self._get_headers()
 
-            logger.info(
-                f"调用商品服务获取热门商品: limit={limit}",
-                extra={"trace_id": trace_id, "limit": limit}
-            )
+            logger.info(f"调用商品服务获取热门商品: limit={limit}")
 
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(url, params={"limit": limit}, headers=headers)
                 response.raise_for_status()
-
-                # 直接返回 List[ProductResponseDto]
-                products_data = response.json()
-                products = [ProductResponseDto(**item) for item in products_data]
-
-                logger.info(
-                    f"获取热门商品成功: count={len(products)}",
-                    extra={"trace_id": trace_id, "count": len(products)}
-                )
-                return products
-
+                products_result_context = ResultContext[list[ProductResponseDto]](**response.json())
+                if products_result_context.success:
+                    products = products_result_context.data
+                    logger.info(f"获取热门商品成功: count={len(products)}")
+                    return products
+                else:
+                    logger.error(f"请求热门商品失败！url: {url}, limit:{limit}")
+                    raise httpx.HTTPError("商品服务异常！")
         except httpx.TimeoutException:
-            logger.error(
-                f"获取热门商品超时: limit={limit}",
-                extra={"trace_id": trace_id}
-            )
-            return []
+            logger.error(f"获取热门商品超时: limit={limit}")
+            raise
         except Exception as e:
-            logger.error(
-                f"获取热门商品异常: error={str(e)}",
-                extra={"trace_id": trace_id},
-                exc_info=True
-            )
-            return []
+            logger.error(f"获取热门商品异常: error={str(e)}",exc_info=True)
+            raise
 
 
 # 单例实例

@@ -5,9 +5,7 @@
 @Time       : 2026/01/01
 @Author     : hcy18
 """
-from typing import Optional
-from v2.nacos import SelectInstancesParam
-
+from v2.nacos import ListInstanceParam
 from app.config.nacos_client import get_nacos_client
 from app.utils.logger import app_logger as logger
 
@@ -16,7 +14,7 @@ class ServiceDiscovery:
     """服务发现客户端，用于从 Nacos 获取其他微服务的地址."""
 
     @staticmethod
-    async def get_service_url(service_name: str, group_name: str = "DEFAULT_GROUP") -> str:
+    async def get_service_url(service_name: str) -> str:
         """
         从 Nacos 获取服务地址.
 
@@ -31,18 +29,22 @@ class ServiceDiscovery:
             RuntimeError: 如果服务未找到或不健康
         """
         try:
+            # 获取 nacos 注册中心
             nacos_client = get_nacos_client()
-            register_client = nacos_client.register_client
 
-            if not register_client:
+            # 获取服务注册中心
+            naming_client = nacos_client.register_client
+
+            if not naming_client:
                 raise RuntimeError("Nacos 注册中心客户端未初始化")
 
             # 获取健康的服务实例
-            instances = await register_client.select_instances(
-                SelectInstancesParam(
+            instances = await naming_client.list_instances(
+                ListInstanceParam(
                     service_name=service_name,
-                    group_name=group_name,
+                    group_name=nacos_client.group,
                     healthy_only=True,
+                    clusters=[nacos_client.service_cluster]
                 )
             )
 
