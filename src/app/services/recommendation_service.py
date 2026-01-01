@@ -30,12 +30,14 @@ class RecommendationService:
         self.nacos_client = get_nacos_client()
         self.min_behavior_count = 3  # 使用行为推荐的最少行为数, 默认 3
         self.user_behavior_history = 30  # 考虑的用户行为历史天数，默认 30 天的行为历史
+        self.min_distance = 0.45  # 相似度阈值，低于则不被推荐
 
 
     def _initialize(self):
         self.config = self.nacos_client.get_recommendation_config()
         self.min_behavior_count = self.config["min_behavior_count"]
         self.user_behavior_history = self.config["user_behavior_history"]
+        self.min_distance = self.config["min_distance"]
 
 
     async def recommend(self, user_id: int, limit: int = 10) -> Tuple[List[ProductResponseDto], str]:
@@ -462,22 +464,23 @@ class RecommendationService:
                 "metric_type": "COSINE",
                 "params": {"ef": 64}
             }
-
+            # SearchResult
             results = collection.search(
                 data=[np.array(search_vector).tolist()],
                 anns_field="embedding",
                 param=search_params,
                 limit=search_limit,
-                output_fields=["product_id"]
+                output_fields=["product_id"]  # 只取商品 id
             )
 
             # Step 4: 提取商品ID
             all_product_ids = []
             if results and len(results) > 0:
-                for hit in results[0]:
-                    product_id = hit.entity.get("product_id")
-                    if product_id:
+                for hit in results[0]:  # results[0] 的类型是 HybridHits
+                    product_id = hit.entity.get("product_id")     # 每一个 hit 是 Hit 对象，格式 {'id':'1', 'distance': 0.2, 'entity':搜索记录}
+                    if product_id and hit.distance >= self.min_distance:
                         all_product_ids.append(int(product_id))
+                        logger.info(f"搜索商品: product_id={product_id}， distance={hit.distance}")
 
             total = len(all_product_ids)
 

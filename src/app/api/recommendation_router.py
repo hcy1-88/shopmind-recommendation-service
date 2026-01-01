@@ -71,40 +71,6 @@ async def recommend_products(
         )
 
 
-@router.get("/products", response_model=ResultContext[List[ProductResponseDto]])
-async def recommend_products_simple(
-    user_id: int = Query(..., description="用户ID", alias="userId"),
-    limit: int = Query(10, ge=1, le=100, description="推荐数量（1-100）")
-) -> ResultContext[List[ProductResponseDto]]:
-    """
-    简化版推荐接口（仅返回商品列表）.
-
-    与 `/recommend` 接口相比，此接口直接返回商品列表，不包含策略信息。
-    适合前端不需要关心推荐策略的场景。
-    """
-    try:
-        logger.info(f"收到简化推荐请求: user_id={user_id}, limit={limit}")
-
-        # 调用推荐服务
-        recommendation_service = get_recommendation_service()
-        products, strategy = await recommendation_service.recommend(user_id=user_id, limit=limit)
-
-        logger.info(
-            f"简化推荐完成: user_id={user_id}, strategy={strategy}, count={len(products)}"
-        )
-
-        return ResultContext.ok(
-            data=products,
-            message="推荐成功"
-        )
-
-    except Exception as e:
-        logger.error(f"简化推荐接口异常: user_id={user_id}, error={str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"推荐服务异常: {str(e)}"
-        )
-
 
 @router.get("/products/search", response_model=ResultContext[PageResult])
 async def search_products(
@@ -130,12 +96,8 @@ async def search_products(
     - 搜索 "iPhone 手机" → 返回数码产品
     - 搜索 "运动鞋" → 返回运动装备
     """
-    trace_id = get_trace_id()
     try:
-        logger.info(
-            f"收到搜索请求: keyword={keyword}, page={page_number}, size={page_size}",
-            extra={"trace_id": trace_id, "keyword": keyword}
-        )
+        logger.info(f"收到搜索请求: keyword={keyword}, page={page_number}, size={page_size}")
 
         # 调用推荐服务的搜索功能
         recommendation_service = get_recommendation_service()
@@ -146,9 +108,7 @@ async def search_products(
         )
 
         logger.info(
-            f"搜索完成: keyword={keyword}, page={page_number}, count={len(page_result.data)}, total={page_result.total}",
-            extra={"trace_id": trace_id, "keyword": keyword, "total": page_result.total}
-        )
+            f"搜索完成: keyword={keyword}, page={page_number}, count={len(page_result.data)}, total={page_result.total}")
 
         return ResultContext.ok(
             data=page_result,
@@ -158,7 +118,6 @@ async def search_products(
     except Exception as e:
         logger.error(
             f"搜索接口异常: keyword={keyword}, error={str(e)}",
-            extra={"trace_id": trace_id, "keyword": keyword},
             exc_info=True
         )
         raise HTTPException(
