@@ -65,11 +65,8 @@ class ProductServiceClient:
                     headers=headers
                 )
                 response.raise_for_status()
-
-                jj = response.json()
-                print(jj)
-
-                products_result_context = ResultContext[list[ProductResponseDto]](**jj)
+                
+                products_result_context = ResultContext[list[ProductResponseDto]](**response.json())
 
                 if products_result_context.success:
                     products = products_result_context.data
