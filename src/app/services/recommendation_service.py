@@ -20,11 +20,21 @@ from app.utils.logger import app_logger as logger
 class RecommendationService:
     """推荐服务核心类."""
 
+    _instance: Optional["RecommendationService"] = None
+
     def __init__(self):
         self.user_client = get_user_service_client()
         self.product_client = get_product_service_client()
         self.embedding_service = get_embedding_service()
-        self.min_behavior_count = 3  # 使用行为推荐的最少行为数
+        self.min_behavior_count = 3  # 使用行为推荐的最少行为数, 默认 3
+        self.user_behavior_history = 30  # 考虑的用户行为历史天数，默认 30 天的行为历史
+
+
+    def _initialize(self):
+        self.config = get_recommendation_service()
+        self.min_behavior_count = self.config["min_behavior_count"]
+        self.user_behavior_history = self.config["user_behavior_history"]
+
 
     async def recommend(self, user_id: int, limit: int = 10) -> Tuple[List[ProductResponseDto], str]:
         """
@@ -44,8 +54,8 @@ class RecommendationService:
         try:
             # Step 1: 并行获取用户兴趣、行为历史和搜索关键词
             interests_task = self.user_client.get_user_interests(user_id)
-            behaviors_task = self.user_client.get_product_behaviors(user_id, day=7)
-            keywords_task = self.user_client.get_search_keywords(user_id, day=7)
+            behaviors_task = self.user_client.get_product_behaviors(user_id, day=self.user_behavior_history)
+            keywords_task = self.user_client.get_search_keywords(user_id, day=self.user_behavior_history)
 
             # 等待并发结果
             interests, interacted_product_ids, search_keywords = await asyncio.gather(
@@ -515,6 +525,15 @@ class RecommendationService:
                 page_size=page_size
             )
 
+    @classmethod
+    def get_instance(cls) -> "RecommendationService":
+        """统一单例"""
+        if cls._instance is None:
+            cls._instance = cls()
+            cls._instance._initialize()
+        return cls._instance
+
+
 
 # 单例实例
 _recommendation_service: Optional[RecommendationService] = None
@@ -522,8 +541,5 @@ _recommendation_service: Optional[RecommendationService] = None
 
 def get_recommendation_service() -> RecommendationService:
     """获取推荐服务单例."""
-    global _recommendation_service
-    if _recommendation_service is None:
-        _recommendation_service = RecommendationService()
-    return _recommendation_service
+    return RecommendationService.get_instance()
 

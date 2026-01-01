@@ -207,6 +207,15 @@ class NacosClient:
         raise ValueError("嵌入模型 配置缺失，服务启动失败！")
 
 
+    def get_recommendation_config(self) -> dict[str, Any]:
+        """跟推荐相关的参数"""
+        nacos_config = self.config_from_nacos
+        NAME = "recommendation"
+        if NAME in nacos_config:
+            return nacos_config[NAME]
+        raise ValueError("recommendation 配置项缺失，服务启动失败！")
+
+
 def get_nacos_client(settings: Optional[Settings] = None) -> NacosClient:
     """
     获取 NacosClient 单例实例.
