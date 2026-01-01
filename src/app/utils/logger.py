@@ -9,6 +9,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from app.utils.trace_context import get_trace_id
+
 # 尝试使用 colorlog ( uv add colorlog )，如果没有安装则降级为普通 formatter
 try:
     from colorlog import ColoredFormatter
@@ -16,6 +18,23 @@ try:
     USE_COLOR = True
 except ImportError:
     USE_COLOR = False
+
+
+class TraceIDFilter(logging.Filter):
+    """日志过滤器：自动注入 traceId 到日志记录中."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """
+        为日志记录添加 traceId.
+
+        Args:
+            record: 日志记录对象
+
+        Returns:
+            True，表示不过滤该记录
+        """
+        record.traceId = get_trace_id()
+        return True
 
 
 def setup_logging(
@@ -78,14 +97,19 @@ def setup_logging(
     if root_logger.handlers:
         root_logger.handlers.clear()
 
+    # 过滤器
+    trace_filter = TraceIDFilter()
+
     # 控制台 handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(console_formatter)
+    console_handler.addFilter(trace_filter)
     root_logger.addHandler(console_handler)
 
     # 文件 handler
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setFormatter(file_formatter)
+    file_handler.addFilter(trace_filter)
     root_logger.addHandler(file_handler)
 
     return root_logger

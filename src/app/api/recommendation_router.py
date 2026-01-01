@@ -8,7 +8,9 @@
 from typing import List
 from fastapi import APIRouter, Query, HTTPException
 
-from app.schemas.recommendation import ProductResponseDto, RecommendationResponse, ProductSearchParams, PageResult
+from app.schemas.recommendation_schema import RecommendationResponse
+from app.schemas.page_result_schema import PageResult
+from app.schemas.product_service_schema import ProductResponseDto
 from app.schemas.result_context import ResultContext
 from app.services.recommendation_service import get_recommendation_service
 from app.utils.logger import app_logger as logger

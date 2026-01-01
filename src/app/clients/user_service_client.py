@@ -9,7 +9,7 @@ from typing import List, Optional, Dict
 import httpx
 
 from app.clients.service_discovery import get_user_service_url
-from app.schemas.recommendation import UserInterestsResponseDTO, UserBehaviorRequest, UserBehaviorResponseDTO
+from app.schemas.user_service_schema import UserInterestsResponseDTO, UserBehaviorRequest, UserBehaviorResponseDTO
 from app.schemas.result_context import ResultContext
 from app.utils.logger import app_logger as logger
 from app.utils.trace_context import get_trace_id, TRACE_ID_HEADER

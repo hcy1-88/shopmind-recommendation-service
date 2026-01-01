@@ -8,15 +8,13 @@
 from typing import List, Tuple, Optional, Dict
 import numpy as np
 import asyncio
-from pymilvus import Collection
-
 from app.clients.user_service_client import get_user_service_client
 from app.clients.product_service_client import get_product_service_client
-from app.schemas.recommendation import ProductResponseDto, PageResult
+from app.schemas.product_service_schema import ProductResponseDto
+from app.schemas.page_result_schema import PageResult
 from app.services.embedding_service import get_embedding_service
-from app.store.product_collection import get_collection, COLLECTION_NAME
+from app.store.product_collection import get_collection
 from app.utils.logger import app_logger as logger
-from app.utils.trace_context import get_trace_id
 
 
 class RecommendationService:
@@ -40,11 +38,8 @@ class RecommendationService:
             (推荐商品列表, 推荐策略)
             推荐策略: 'personalized' | 'cold_start' | 'fallback'
         """
-        trace_id = get_trace_id()
         logger.info(
-            f"开始生成推荐: user_id={user_id}, limit={limit}",
-            extra={"trace_id": trace_id, "user_id": user_id}
-        )
+            f"开始生成推荐: user_id={user_id}, limit={limit}")
 
         try:
             # Step 1: 并行获取用户兴趣、行为历史和搜索关键词
@@ -67,7 +62,6 @@ class RecommendationService:
                 f"behavior_count={len(interacted_product_ids)}, "
                 f"search_keyword_count={len(search_keywords)}",
                 extra={
-                    "trace_id": trace_id,
                     "user_id": user_id,
                     "has_interests": has_interests,
                     "has_behaviors": has_enough_behaviors,
@@ -87,35 +81,25 @@ class RecommendationService:
                 )
                 if products:
                     logger.info(
-                        f"个性化推荐成功: user_id={user_id}, count={len(products)}",
-                        extra={"trace_id": trace_id, "user_id": user_id, "count": len(products)}
-                    )
+                        f"个性化推荐成功: user_id={user_id}, count={len(products)}")
                     return products, "personalized"
 
             # Step 3: 冷启动或个性化失败 → 热门商品兜底
             logger.info(
-                f"触发冷启动逻辑: user_id={user_id}, reason=无兴趣且行为数不足",
-                extra={"trace_id": trace_id, "user_id": user_id}
-            )
+                f"触发冷启动逻辑: user_id={user_id}, reason=无兴趣且行为数不足")
             products = await self.product_client.get_hot_products(limit=limit)
 
             if products:
-                logger.info(
-                    f"返回热门商品: user_id={user_id}, count={len(products)}",
-                    extra={"trace_id": trace_id, "user_id": user_id, "count": len(products)}
-                )
+                logger.info(f"返回热门商品: user_id={user_id}, count={len(products)}")
                 return products, "cold_start"
             else:
                 logger.warning(
-                    f"热门商品获取失败: user_id={user_id}",
-                    extra={"trace_id": trace_id, "user_id": user_id}
-                )
+                    f"热门商品获取失败: user_id={user_id}")
                 return [], "fallback"
 
         except Exception as e:
             logger.error(
                 f"推荐生成异常: user_id={user_id}, error={str(e)}",
-                extra={"trace_id": trace_id, "user_id": user_id},
                 exc_info=True
             )
             # 降级到热门商品
@@ -146,7 +130,6 @@ class RecommendationService:
         Returns:
             推荐商品列表
         """
-        trace_id = get_trace_id()
         try:
             user_vectors = []
             strategies_used = []
@@ -159,9 +142,7 @@ class RecommendationService:
                     user_vectors.append(behavior_vector)
                     strategies_used.append("behavior")
                     logger.info(
-                        f"使用行为生成用户向量: user_id={user_id}, behavior_count={len(interacted_product_ids)}",
-                        extra={"trace_id": trace_id, "user_id": user_id}
-                    )
+                        f"使用行为生成用户向量: user_id={user_id}, behavior_count={len(interacted_product_ids)}")
             
             # 1.2 基于兴趣生成向量
             if interests:
@@ -170,9 +151,7 @@ class RecommendationService:
                     user_vectors.append(interest_vector)
                     strategies_used.append("interest")
                     logger.info(
-                        f"使用兴趣生成用户向量: user_id={user_id}, interest_count={len(interests)}",
-                        extra={"trace_id": trace_id, "user_id": user_id}
-                    )
+                        f"使用兴趣生成用户向量: user_id={user_id}, interest_count={len(interests)}")
 
             # 1.3 基于搜索关键词生成向量
             if search_keywords:
@@ -181,16 +160,12 @@ class RecommendationService:
                     user_vectors.append(keyword_vector)
                     strategies_used.append("search")
                     logger.info(
-                        f"使用搜索关键词生成用户向量: user_id={user_id}, keyword_count={len(search_keywords)}",
-                        extra={"trace_id": trace_id, "user_id": user_id, "keywords": search_keywords[:5]}
-                    )
+                        f"使用搜索关键词生成用户向量: user_id={user_id}, keyword_count={len(search_keywords)}, keywords={search_keywords[:5]}")
 
             # 1.4 融合多个向量（如果有多个来源）
             if not user_vectors:
                 logger.warning(
-                    f"无法生成用户向量: user_id={user_id}",
-                    extra={"trace_id": trace_id, "user_id": user_id}
-                )
+                    f"无法生成用户向量: user_id={user_id}")
                 return []
 
             if len(user_vectors) > 1:
@@ -198,18 +173,14 @@ class RecommendationService:
                 user_vector = np.mean(user_vectors, axis=0)
                 strategy_used = "+".join(strategies_used)
                 logger.info(
-                    f"融合多个向量: user_id={user_id}, strategies={strategy_used}",
-                    extra={"trace_id": trace_id, "user_id": user_id}
-                )
+                    f"融合多个向量: user_id={user_id}, strategies={strategy_used}")
             else:
                 user_vector = user_vectors[0]
                 strategy_used = strategies_used[0]
 
             if user_vector is None:
                 logger.warning(
-                    f"无法生成用户向量: user_id={user_id}",
-                    extra={"trace_id": trace_id, "user_id": user_id}
-                )
+                    f"无法生成用户向量: user_id={user_id}")
                 return []
 
             # Step 2: 在 Milvus 中进行向量搜索
@@ -220,9 +191,7 @@ class RecommendationService:
 
             if not candidate_product_ids:
                 logger.warning(
-                    f"向量搜索无结果: user_id={user_id}",
-                    extra={"trace_id": trace_id, "user_id": user_id}
-                )
+                    f"向量搜索无结果: user_id={user_id}")
                 return []
 
             # Step 3: 过滤已交互商品
@@ -234,9 +203,7 @@ class RecommendationService:
 
             if not filtered_ids:
                 logger.warning(
-                    f"过滤后无推荐商品: user_id={user_id}",
-                    extra={"trace_id": trace_id, "user_id": user_id}
-                )
+                    f"过滤后无推荐商品: user_id={user_id}")
                 return []
 
             # Step 4: 批量获取商品详情
@@ -247,15 +214,12 @@ class RecommendationService:
             sorted_products = [id_to_product[pid] for pid in filtered_ids if pid in id_to_product]
 
             logger.info(
-                f"个性化推荐完成: user_id={user_id}, strategy={strategy_used}, count={len(sorted_products)}",
-                extra={"trace_id": trace_id, "user_id": user_id, "strategy": strategy_used}
-            )
+                f"个性化推荐完成: user_id={user_id}, strategy={strategy_used}, count={len(sorted_products)}")
             return sorted_products
 
         except Exception as e:
             logger.error(
                 f"个性化推荐异常: user_id={user_id}, error={str(e)}",
-                extra={"trace_id": trace_id, "user_id": user_id},
                 exc_info=True
             )
             return []
@@ -270,7 +234,6 @@ class RecommendationService:
         Returns:
             用户向量（numpy array），如果失败返回 None
         """
-        trace_id = get_trace_id()
         try:
             collection = get_collection()
             collection.load()
@@ -284,9 +247,7 @@ class RecommendationService:
 
             if not results:
                 logger.warning(
-                    f"未找到任何商品向量: product_ids={product_ids}",
-                    extra={"trace_id": trace_id}
-                )
+                    f"未找到任何商品向量: product_ids={product_ids}")
                 return None
 
             # 提取向量并进行平均池化
@@ -294,15 +255,12 @@ class RecommendationService:
             user_vector = np.mean(embeddings, axis=0)
 
             logger.info(
-                f"基于行为生成用户向量: product_count={len(embeddings)}, vector_dim={len(user_vector)}",
-                extra={"trace_id": trace_id}
-            )
+                f"基于行为生成用户向量: product_count={len(embeddings)}, vector_dim={len(user_vector)}")
             return user_vector
 
         except Exception as e:
             logger.error(
                 f"基于行为生成用户向量异常: error={str(e)}",
-                extra={"trace_id": trace_id},
                 exc_info=True
             )
             return None
@@ -317,7 +275,6 @@ class RecommendationService:
         Returns:
             用户向量（numpy array），如果失败返回 None
         """
-        trace_id = get_trace_id()
         try:
             if not interests:
                 return None
@@ -327,34 +284,25 @@ class RecommendationService:
             interest_texts = list(interests.values())
             query_text = " ".join(interest_texts)
 
-            logger.info(
-                f"基于兴趣生成向量: query_text={query_text}",
-                extra={"trace_id": trace_id, "interests": interests}
-            )
+            logger.info(f"基于兴趣生成向量: query_text={query_text}")
 
             # 使用 embedding 服务生成向量
             user_vector = await self.embedding_service.embed_query(query_text)
 
             if not user_vector:
-                logger.warning(
-                    f"兴趣向量生成失败",
-                    extra={"trace_id": trace_id}
-                )
+                logger.warning(f"兴趣向量生成失败")
                 return None
 
             # 转换为 numpy array
             user_vector = np.array(user_vector)
 
             logger.info(
-                f"基于兴趣生成用户向量成功: interest_count={len(interests)}, vector_dim={len(user_vector)}",
-                extra={"trace_id": trace_id}
-            )
+                f"基于兴趣生成用户向量成功: interest_count={len(interests)}, vector_dim={len(user_vector)}")
             return user_vector
 
         except Exception as e:
             logger.error(
                 f"基于兴趣生成用户向量异常: error={str(e)}",
-                extra={"trace_id": trace_id},
                 exc_info=True
             )
             return None
@@ -369,7 +317,6 @@ class RecommendationService:
         Returns:
             用户向量（numpy array），如果失败返回 None
         """
-        trace_id = get_trace_id()
         try:
             if not keywords:
                 return None
@@ -379,34 +326,25 @@ class RecommendationService:
             recent_keywords = keywords[:5]
             query_text = " ".join(recent_keywords)
 
-            logger.info(
-                f"基于搜索关键词生成向量: query_text={query_text}",
-                extra={"trace_id": trace_id, "keywords": recent_keywords}
-            )
+            logger.info(f"基于搜索关键词生成向量: query_text={query_text}")
 
             # 使用 embedding 服务生成向量
             user_vector = await self.embedding_service.embed_query(query_text)
 
             if not user_vector:
-                logger.warning(
-                    f"搜索关键词向量生成失败",
-                    extra={"trace_id": trace_id}
-                )
+                logger.warning(f"搜索关键词向量生成失败")
                 return None
 
             # 转换为 numpy array
             user_vector = np.array(user_vector)
 
             logger.info(
-                f"基于搜索关键词生成用户向量成功: keyword_count={len(recent_keywords)}, vector_dim={len(user_vector)}",
-                extra={"trace_id": trace_id}
-            )
+                f"基于搜索关键词生成用户向量成功: keyword_count={len(recent_keywords)}, vector_dim={len(user_vector)}")
             return user_vector
 
         except Exception as e:
             logger.error(
                 f"基于搜索关键词生成用户向量异常: error={str(e)}",
-                extra={"trace_id": trace_id},
                 exc_info=True
             )
             return None
@@ -426,7 +364,6 @@ class RecommendationService:
         Returns:
             推荐的商品ID列表（按相似度排序）
         """
-        trace_id = get_trace_id()
         try:
             collection = get_collection()
             collection.load()
@@ -455,15 +392,12 @@ class RecommendationService:
                         product_ids.append(int(product_id))
 
             logger.info(
-                f"向量搜索完成: found={len(product_ids)}, top_k={top_k}",
-                extra={"trace_id": trace_id, "found": len(product_ids)}
-            )
+                f"向量搜索完成: found={len(product_ids)}, top_k={top_k}")
             return product_ids
 
         except Exception as e:
             logger.error(
                 f"向量搜索异常: error={str(e)}",
-                extra={"trace_id": trace_id},
                 exc_info=True
             )
             return []
@@ -485,11 +419,8 @@ class RecommendationService:
         Returns:
             分页结果（包含商品列表、总数、页码、页大小）
         """
-        trace_id = get_trace_id()
         logger.info(
-            f"开始语义搜索: keyword={keyword}, page={page_number}, size={page_size}",
-            extra={"trace_id": trace_id, "keyword": keyword, "page_number": page_number}
-        )
+            f"开始语义搜索: keyword={keyword}, page={page_number}, size={page_size}",)
 
         try:
             # Step 1: 使用 embedding 服务将关键词转为向量
@@ -497,9 +428,7 @@ class RecommendationService:
             
             if not search_vector:
                 logger.warning(
-                    f"关键词向量生成失败: keyword={keyword}",
-                    extra={"trace_id": trace_id}
-                )
+                    f"关键词向量生成失败: keyword={keyword}")
                 return PageResult(
                     data=[],
                     total=0,
@@ -511,10 +440,7 @@ class RecommendationService:
             # 搜索 (page_number * page_size) 个结果，然后取最后一页
             search_limit = page_number * page_size
 
-            logger.info(
-                f"关键词向量生成成功: keyword={keyword}, vector_dim={len(search_vector)}",
-                extra={"trace_id": trace_id}
-            )
+            logger.info(f"关键词向量生成成功: keyword={keyword}, vector_dim={len(search_vector)}")
 
             # Step 3: 在 Milvus 中进行向量搜索
             collection = get_collection()
@@ -543,10 +469,7 @@ class RecommendationService:
 
             total = len(all_product_ids)
 
-            logger.info(
-                f"向量搜索完成: keyword={keyword}, total={total}",
-                extra={"trace_id": trace_id, "total": total}
-            )
+            logger.info(f"向量搜索完成: keyword={keyword}, total={total}")
 
             # Step 5: 分页处理
             start_index = (page_number - 1) * page_size
@@ -554,10 +477,7 @@ class RecommendationService:
             page_product_ids = all_product_ids[start_index:end_index]
 
             if not page_product_ids:
-                logger.info(
-                    f"当前页无数据: page={page_number}",
-                    extra={"trace_id": trace_id}
-                )
+                logger.info(f"当前页无数据: page={page_number}")
                 return PageResult(
                     data=[],
                     total=total,
@@ -573,9 +493,7 @@ class RecommendationService:
             sorted_products = [id_to_product[pid] for pid in page_product_ids if pid in id_to_product]
 
             logger.info(
-                f"搜索完成: keyword={keyword}, page={page_number}, returned={len(sorted_products)}, total={total}",
-                extra={"trace_id": trace_id, "page": page_number, "returned": len(sorted_products)}
-            )
+                f"搜索完成: keyword={keyword}, page={page_number}, returned={len(sorted_products)}, total={total}")
 
             return PageResult(
                 data=sorted_products,
@@ -587,7 +505,6 @@ class RecommendationService:
         except Exception as e:
             logger.error(
                 f"搜索异常: keyword={keyword}, error={str(e)}",
-                extra={"trace_id": trace_id, "keyword": keyword},
                 exc_info=True
             )
             # 返回空结果
