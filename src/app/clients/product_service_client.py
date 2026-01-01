@@ -56,7 +56,7 @@ class ProductServiceClient:
 
             request_body = ProductGettingRequestDTO(ids=product_ids)
 
-            logger.info(f"调用商品服务批量获取商品: product_ids={product_ids[:10]}..., count={len(product_ids)}")
+            logger.info(f"调用商品服务批量获取商品数量: count={len(product_ids)}")
 
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(

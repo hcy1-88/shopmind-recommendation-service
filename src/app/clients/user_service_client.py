@@ -174,6 +174,45 @@ class UserServiceClient:
         logger.info(f"提取用户商品行为: user_id={user_id}, product_count={len(product_ids)}")
         return product_ids
 
+    async def get_purchased_products(self, user_id: int, day: int = 365) -> List[int]:
+        """
+        获取用户已购买的商品ID列表（用于推荐过滤）.
+
+        Args:
+            user_id: 用户ID
+            day: 最近多少天（默认一年内）
+
+        Returns:
+            已购买的商品ID列表（去重后）
+        """
+        try:
+            behaviors = await self.get_user_behaviors(
+                user_id=user_id,
+                day=day,
+                behavior_type="purchase"
+            )
+
+            # 提取已购买的商品ID并去重
+            purchased_ids = []
+            seen = set()
+            for behavior in behaviors:
+                if behavior.target_type == "product" and behavior.target_id:
+                    try:
+                        product_id = int(behavior.target_id)
+                        if product_id not in seen:
+                            purchased_ids.append(product_id)
+                            seen.add(product_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"无效的商品ID: {behavior.target_id}")
+                        continue
+
+            logger.info(f"提取用户已购买商品: user_id={user_id}, purchased_count={len(purchased_ids)}")
+            return purchased_ids
+
+        except Exception as e:
+            logger.error(f"获取已购买商品异常: user_id={user_id}, error={str(e)}", exc_info=True)
+            return []
+
     async def get_search_keywords(self, user_id: int, day: int = 30) -> List[str]:
         """
         获取用户最近的搜索关键词.

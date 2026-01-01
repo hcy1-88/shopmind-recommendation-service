@@ -5,6 +5,7 @@
 @Time       : 2025/12/31 22:48
 @Author     : hcy18
 """
+import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -21,6 +22,8 @@ from app.config.settings import get_settings
 from app.middleware.trace_middleware import TraceIDMiddleware
 from app.schemas.result_context import ResultContext
 from app.services.embedding_service import init_embedding_service
+from app.services.recommendation_service import get_recommendation_service
+from app.clients.redis_client import get_redis_client
 from app.store.milvus_client import init_milvus, MilvusClient
 from app.utils.logger import setup_logging, app_logger as logger
 
@@ -33,6 +36,7 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown events.
     """
     # Startup
+    refresh_task = None
     try:
         # Get settings first
         settings = get_settings()
@@ -46,12 +50,21 @@ async def lifespan(app: FastAPI):
         # nacos 初始化
         await init_nacos(settings)
 
+        # 初始化 Redis
+        redis_client = get_redis_client()
+        await redis_client.connect()
+        logger.info("Redis 初始化完成")
 
         # 初始化 Embedding 服务
         init_embedding_service()
 
         # 初始化 Milvus
         init_milvus()
+
+        # 启动用户向量刷新定时任务
+        recommendation_service = get_recommendation_service()
+        refresh_task = asyncio.create_task(recommendation_service.refresh_user_vectors_task())
+        logger.info("用户向量刷新定时任务已启动")
 
         logger.info("Shopmind Recommendation service 启动成功！")
 
@@ -81,6 +94,20 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Recommendation service...")
 
     try:
+        # 取消刷新任务
+        if refresh_task and not refresh_task.done():
+            refresh_task.cancel()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("用户向量刷新任务已停止")
+
+        # 关闭 Redis
+        redis_client = get_redis_client()
+        await redis_client.close()
+        logger.info("Redis 连接已关闭")
+
         # 注销 from Nacos
         nacos_client = get_nacos_client()
         await nacos_client.deregister_service()

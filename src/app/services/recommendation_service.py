@@ -10,6 +10,7 @@ import numpy as np
 import asyncio
 from app.clients.user_service_client import get_user_service_client
 from app.clients.product_service_client import get_product_service_client
+from app.clients.redis_client import get_redis_client
 from app.schemas.product_service_schema import ProductResponseDto
 from app.schemas.page_result_schema import PageResult
 from app.services.embedding_service import get_embedding_service
@@ -26,11 +27,13 @@ class RecommendationService:
     def __init__(self):
         self.user_client = get_user_service_client()
         self.product_client = get_product_service_client()
+        self.redis_client = get_redis_client()
         self.embedding_service = get_embedding_service()
         self.nacos_client = get_nacos_client()
         self.min_behavior_count = 3  # 使用行为推荐的最少行为数, 默认 3
         self.user_behavior_history = 30  # 考虑的用户行为历史天数，默认 30 天的行为历史
         self.min_distance = 0.45  # 相似度阈值，低于则不被推荐
+        self.vector_cache_ttl = 600  # 用户向量缓存时间（秒），默认 10 分钟
 
 
     def _initialize(self):
@@ -38,6 +41,7 @@ class RecommendationService:
         self.min_behavior_count = self.config["min_behavior_count"]
         self.user_behavior_history = self.config["user_behavior_history"]
         self.min_distance = self.config["min_distance"]
+        self.vector_cache_ttl = self.config["vector_cache_ttl"]
 
 
     async def recommend(self, user_id: int, limit: int = 10) -> Tuple[List[ProductResponseDto], str]:
@@ -52,16 +56,51 @@ class RecommendationService:
             (推荐商品列表, 推荐策略)
             推荐策略: 'personalized' | 'cold_start' | 'fallback'
         """
-        logger.info(
-            f"开始生成推荐: user_id={user_id}, limit={limit}")
+        logger.info(f"开始生成推荐: user_id={user_id}, limit={limit}")
 
         try:
-            # Step 1: 并行获取用户兴趣、行为历史和搜索关键词
+            # Step 1: 尝试从 Redis 获取用户向量
+            cached_vector = await self.redis_client.get_user_vector(user_id)
+
+            if cached_vector is not None:
+                # 使用缓存的用户向量进行推荐
+                logger.info(f"使用缓存的用户向量: user_id={user_id}")
+                user_vector = np.array(cached_vector)
+
+                # 获取已购买商品列表（用于过滤）
+                purchased_product_ids = await self.user_client.get_purchased_products(user_id)
+
+                # 向量搜索
+                candidate_product_ids = await self._vector_search(
+                    user_vector=user_vector,
+                    top_k=limit * 3,
+                )
+
+                # 过滤已购买商品
+                if purchased_product_ids:
+                    purchased_set = set(purchased_product_ids)
+                    filtered_ids = [pid for pid in candidate_product_ids if pid not in purchased_set][:limit]
+                else:
+                    filtered_ids = candidate_product_ids[:limit]
+
+                # 获取商品详情
+                if filtered_ids:
+                    products = await self.product_client.get_products_by_ids(filtered_ids)
+                    id_to_product = {p.id: p for p in products}
+                    sorted_products = [id_to_product[pid] for pid in filtered_ids if pid in id_to_product]
+
+                    if sorted_products:
+                        logger.info(f"缓存向量推荐成功: user_id={user_id}, count={len(sorted_products)}")
+                        return sorted_products, "personalized"
+
+            # Step 2: 缓存未命中或推荐失败，执行完整推荐流程
+            logger.info(f"执行完整推荐流程: user_id={user_id}")
+
+            # 并行获取用户兴趣、行为历史和搜索关键词
             interests_task = self.user_client.get_user_interests(user_id)
             behaviors_task = self.user_client.get_product_behaviors(user_id, day=self.user_behavior_history)
             keywords_task = self.user_client.get_search_keywords(user_id, day=self.user_behavior_history)
 
-            # 等待并发结果
             interests, interacted_product_ids, search_keywords = await asyncio.gather(
                 interests_task, behaviors_task, keywords_task
             )
@@ -83,10 +122,10 @@ class RecommendationService:
                 }
             )
 
-            # Step 2: 判断推荐策略 - 有兴趣、足够行为或搜索关键词则进行个性化推荐
+            # Step 3: 判断推荐策略 - 有兴趣、足够行为或搜索关键词则进行个性化推荐
             if has_interests or has_enough_behaviors or has_search_keywords:
                 # 个性化推荐
-                products = await self._personalized_recommend(
+                products = await self._personalized_recommend_with_cache(
                     user_id=user_id,
                     interests=interests.interests if has_interests else None,
                     interacted_product_ids=interacted_product_ids if has_enough_behaviors else None,
@@ -94,34 +133,179 @@ class RecommendationService:
                     limit=limit
                 )
                 if products:
-                    logger.info(
-                        f"个性化推荐成功: user_id={user_id}, count={len(products)}")
+                    logger.info(f"个性化推荐成功: user_id={user_id}, count={len(products)}")
                     return products, "personalized"
 
-            # Step 3: 冷启动或个性化失败 → 热门商品兜底
-            logger.info(
-                f"触发冷启动逻辑: user_id={user_id}, reason=无兴趣且行为数不足")
+            # Step 4: 冷启动或个性化失败 → 热门商品兜底
+            logger.info(f"触发冷启动逻辑: user_id={user_id}, reason=无兴趣且行为数不足")
             products = await self.product_client.get_hot_products(limit=limit)
 
             if products:
                 logger.info(f"返回热门商品: user_id={user_id}, count={len(products)}")
                 return products, "cold_start"
             else:
-                logger.warning(
-                    f"热门商品获取失败: user_id={user_id}")
+                logger.warning(f"热门商品获取失败: user_id={user_id}")
                 return [], "fallback"
 
         except Exception as e:
-            logger.error(
-                f"推荐生成异常: user_id={user_id}, error={str(e)}",
-                exc_info=True
-            )
+            logger.error(f"推荐生成异常: user_id={user_id}, error={str(e)}", exc_info=True)
             # 降级到热门商品
             try:
                 products = await self.product_client.get_hot_products(limit=limit)
                 return products, "fallback"
             except Exception:
                 return [], "fallback"
+
+    async def _personalized_recommend_with_cache(
+        self,
+        user_id: int,
+        interests: Optional[Dict[str, str]] = None,
+        interacted_product_ids: Optional[List[int]] = None,
+        search_keywords: Optional[List[str]] = None,
+        limit: int = 10
+    ) -> List[ProductResponseDto]:
+        """
+        个性化推荐（支持基于兴趣、行为或搜索关键词），并缓存用户向量.
+
+        Args:
+            user_id: 用户ID
+            interests: 用户兴趣标签 (key: 英文code, value: 中文名称)
+            interacted_product_ids: 用户已交互的商品ID列表（用于生成基于行为的用户向量）
+            search_keywords: 用户搜索关键词列表
+            limit: 推荐数量
+
+        Returns:
+            推荐商品列表
+            
+        Note:
+            - 只会过滤已购买（purchase）的商品
+            - 其他行为（view/like/share/add_cart）的商品仍会被推荐
+        """
+        try:
+            # 生成用户向量
+            user_vector = await self._compute_user_vector(
+                user_id=user_id,
+                interests=interests,
+                interacted_product_ids=interacted_product_ids,
+                search_keywords=search_keywords
+            )
+
+            if user_vector is None:
+                logger.warning(f"无法生成用户向量: user_id={user_id}")
+                return []
+
+            # 缓存用户向量到 Redis
+            await self.redis_client.set_user_vector(
+                user_id=user_id,
+                vector=user_vector.tolist(),
+                ttl=self.vector_cache_ttl
+            )
+
+            # 向量搜索
+            candidate_product_ids = await self._vector_search(
+                user_vector=user_vector,
+                top_k=limit * 3,
+            )
+
+            if not candidate_product_ids:
+                logger.warning(f"向量搜索无结果: user_id={user_id}")
+                return []
+
+            # 获取已购买商品（用于过滤）
+            purchased_product_ids = await self.user_client.get_purchased_products(user_id)
+
+            # 过滤已购买商品
+            if purchased_product_ids:
+                purchased_set = set(purchased_product_ids)
+                filtered_ids = [pid for pid in candidate_product_ids if pid not in purchased_set][:limit]
+                logger.info(f"过滤已购买商品: user_id={user_id}, purchased_count={len(purchased_product_ids)}, filtered_out={len([pid for pid in candidate_product_ids if pid in purchased_set])}")
+            else:
+                filtered_ids = candidate_product_ids[:limit]
+
+            if not filtered_ids:
+                logger.warning(f"过滤后无推荐商品: user_id={user_id}")
+                return []
+
+            # 获取商品详情
+            products = await self.product_client.get_products_by_ids(filtered_ids)
+            id_to_product = {p.id: p for p in products}
+            sorted_products = [id_to_product[pid] for pid in filtered_ids if pid in id_to_product]
+
+            logger.info(f"个性化推荐完成: user_id={user_id}, count={len(sorted_products)}")
+            return sorted_products
+
+        except Exception as e:
+            logger.error(f"个性化推荐异常: user_id={user_id}, error={str(e)}", exc_info=True)
+            return []
+
+    async def _compute_user_vector(
+        self,
+        user_id: int,
+        interests: Optional[Dict[str, str]] = None,
+        interacted_product_ids: Optional[List[int]] = None,
+        search_keywords: Optional[List[str]] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        计算用户向量（融合行为、兴趣、搜索关键词）.
+
+        Args:
+            user_id: 用户ID
+            interests: 用户兴趣标签
+            interacted_product_ids: 用户已交互的商品ID列表（用于生成基于行为的向量）
+            search_keywords: 用户搜索关键词列表
+
+        Returns:
+            用户向量（numpy array），如果失败返回 None
+            
+        Note:
+            interacted_product_ids 包含所有交互行为（view/like/share/add_cart等），
+            用于更全面地理解用户兴趣
+        """
+        try:
+            user_vectors = []
+            strategies_used = []
+
+            # 1. 基于行为生成向量
+            if interacted_product_ids and len(interacted_product_ids) >= self.min_behavior_count:
+                behavior_vector = await self._get_user_vector_from_behaviors(interacted_product_ids)
+                if behavior_vector is not None:
+                    user_vectors.append(behavior_vector)
+                    strategies_used.append("behavior")
+                    logger.info(f"使用行为生成用户向量: user_id={user_id}, behavior_count={len(interacted_product_ids)}")
+
+            # 2. 基于兴趣生成向量
+            if interests:
+                interest_vector = await self._get_user_vector_from_interests(interests)
+                if interest_vector is not None:
+                    user_vectors.append(interest_vector)
+                    strategies_used.append("interest")
+                    logger.info(f"使用兴趣生成用户向量: user_id={user_id}, interest_count={len(interests)}")
+
+            # 3. 基于搜索关键词生成向量
+            if search_keywords:
+                keyword_vector = await self._get_user_vector_from_keywords(search_keywords)
+                if keyword_vector is not None:
+                    user_vectors.append(keyword_vector)
+                    strategies_used.append("search")
+                    logger.info(f"使用搜索关键词生成用户向量: user_id={user_id}, keyword_count={len(search_keywords)}, keywords={search_keywords[:5]}")
+
+            # 4. 融合多个向量
+            if not user_vectors:
+                logger.warning(f"无法生成用户向量: user_id={user_id}")
+                return None
+
+            if len(user_vectors) > 1:
+                user_vector = np.mean(user_vectors, axis=0)
+                strategy_used = "+".join(strategies_used)
+                logger.info(f"融合多个向量: user_id={user_id}, strategies={strategy_used}")
+            else:
+                user_vector = user_vectors[0]
+
+            return user_vector
+
+        except Exception as e:
+            logger.error(f"计算用户向量异常: user_id={user_id}, error={str(e)}", exc_info=True)
+            return None
 
     async def _personalized_recommend(
         self,
@@ -137,12 +321,16 @@ class RecommendationService:
         Args:
             user_id: 用户ID
             interests: 用户兴趣标签 (key: 英文code, value: 中文名称)
-            interacted_product_ids: 用户已交互的商品ID列表
+            interacted_product_ids: 用户已交互的商品ID列表（用于生成基于行为的用户向量）
             search_keywords: 用户搜索关键词列表
             limit: 推荐数量
 
         Returns:
             推荐商品列表
+            
+        Note:
+            - 只会过滤已购买（purchase）的商品
+            - 其他行为（view/like/share/add_cart）的商品仍会被推荐
         """
         try:
             user_vectors = []
@@ -208,10 +396,12 @@ class RecommendationService:
                     f"向量搜索无结果: user_id={user_id}")
                 return []
 
-            # Step 3: 过滤已交互商品
-            if interacted_product_ids:
-                interacted_set = set(interacted_product_ids)
-                filtered_ids = [pid for pid in candidate_product_ids if pid not in interacted_set][:limit]
+            # Step 3: 过滤已购买商品
+            purchased_product_ids = await self.user_client.get_purchased_products(user_id)
+            if purchased_product_ids:
+                purchased_set = set(purchased_product_ids)
+                filtered_ids = [pid for pid in candidate_product_ids if pid not in purchased_set][:limit]
+                logger.info(f"过滤已购买商品: user_id={user_id}, purchased_count={len(purchased_product_ids)}")
             else:
                 filtered_ids = candidate_product_ids[:limit]
 
@@ -264,8 +454,15 @@ class RecommendationService:
                     f"未找到任何商品向量: product_ids={product_ids}")
                 return None
 
-            # 提取向量并进行平均池化
-            embeddings = [np.array(item["embedding"]) for item in results]
+            # 提取向量并去重（同一个 product_id 只保留一个）
+            product_embeddings = {}
+            for item in results:
+                pid = item["product_id"]
+                if pid not in product_embeddings:
+                    product_embeddings[pid] = np.array(item["embedding"])
+
+            # 进行平均池化
+            embeddings = list(product_embeddings.values())
             user_vector = np.mean(embeddings, axis=0)
 
             logger.info(
@@ -397,13 +594,17 @@ class RecommendationService:
                 output_fields=["product_id"]
             )
 
-            # 提取商品ID
+            # 提取商品ID（去重，保持顺序）
             product_ids = []
+            seen = set()
             if results and len(results) > 0:
                 for hit in results[0]:
                     product_id = hit.entity.get("product_id")
                     if product_id:
-                        product_ids.append(int(product_id))
+                        pid = int(product_id)
+                        if pid not in seen:
+                            product_ids.append(pid)
+                            seen.add(pid)
 
             logger.info(
                 f"向量搜索完成: found={len(product_ids)}, top_k={top_k}")
@@ -473,14 +674,18 @@ class RecommendationService:
                 output_fields=["product_id"]  # 只取商品 id
             )
 
-            # Step 4: 提取商品ID
+            # Step 4: 提取商品ID（去重，保持顺序）
             all_product_ids = []
+            seen = set()
             if results and len(results) > 0:
                 for hit in results[0]:  # results[0] 的类型是 HybridHits
                     product_id = hit.entity.get("product_id")     # 每一个 hit 是 Hit 对象，格式 {'id':'1', 'distance': 0.2, 'entity':搜索记录}
                     if product_id and hit.distance >= self.min_distance:
-                        all_product_ids.append(int(product_id))
-                        logger.info(f"搜索商品: product_id={product_id}， distance={hit.distance}")
+                        pid = int(product_id)
+                        if pid not in seen:
+                            all_product_ids.append(pid)
+                            seen.add(pid)
+                            logger.info(f"搜索商品: product_id={product_id}， distance={hit.distance}")
 
             total = len(all_product_ids)
 
@@ -529,6 +734,93 @@ class RecommendationService:
                 page_number=page_number,
                 page_size=page_size
             )
+
+    async def refresh_user_vectors_task(self):
+        """
+        定时刷新用户向量任务（后台运行）.
+        """
+        logger.info("用户向量定时刷新任务启动")
+
+        while True:
+            try:
+                # 等待刷新间隔（默认 10 分钟）
+                await asyncio.sleep(self.vector_cache_ttl)
+
+                logger.info("开始刷新用户向量...")
+
+                # TODO: 这里可以从用户服务获取活跃用户列表
+                # 目前简单实现：只刷新 Redis 中已有的用户向量
+                # 实际生产中，可以维护一个活跃用户列表
+
+                logger.info("用户向量刷新完成")
+
+            except asyncio.CancelledError:
+                logger.info("用户向量刷新任务已取消")
+                break
+            except Exception as e:
+                logger.error(f"刷新用户向量异常: {e}", exc_info=True)
+                # 继续运行，不中断定时任务
+
+    async def refresh_user_vector(self, user_id: int):
+        """
+        刷新单个用户的向量.
+
+        Args:
+            user_id: 用户ID
+        """
+        try:
+            logger.info(f"开始刷新用户向量: user_id={user_id}")
+
+            # 获取用户数据
+            interests_task = self.user_client.get_user_interests(user_id)
+            behaviors_task = self.user_client.get_product_behaviors(user_id, day=self.user_behavior_history)
+            keywords_task = self.user_client.get_search_keywords(user_id, day=self.user_behavior_history)
+
+            interests, interacted_product_ids, search_keywords = await asyncio.gather(
+                interests_task, behaviors_task, keywords_task, return_exceptions=True
+            )
+
+            # 检查是否有异常
+            if isinstance(interests, Exception):
+                logger.error(f"获取用户兴趣失败: user_id={user_id}, error={interests}")
+                return
+            if isinstance(interacted_product_ids, Exception):
+                logger.error(f"获取用户行为失败: user_id={user_id}, error={interacted_product_ids}")
+                return
+            if isinstance(search_keywords, Exception):
+                logger.error(f"获取搜索关键词失败: user_id={user_id}, error={search_keywords}")
+                return
+
+            has_interests = interests and interests.interests
+            has_enough_behaviors = len(interacted_product_ids) >= self.min_behavior_count
+            has_search_keywords = len(search_keywords) > 0
+
+            # 只有当用户有数据时才更新向量
+            if not (has_interests or has_enough_behaviors or has_search_keywords):
+                logger.info(f"用户无有效数据，跳过刷新: user_id={user_id}")
+                return
+
+            # 计算用户向量
+            user_vector = await self._compute_user_vector(
+                user_id=user_id,
+                interests=interests.interests if has_interests else None,
+                interacted_product_ids=interacted_product_ids if has_enough_behaviors else None,
+                search_keywords=search_keywords if has_search_keywords else None,
+            )
+
+            if user_vector is not None:
+                # 更新 Redis 缓存
+                await self.redis_client.set_user_vector(
+                    user_id=user_id,
+                    vector=user_vector.tolist(),
+                    ttl=self.vector_cache_ttl
+                )
+                logger.info(f"用户向量刷新成功: user_id={user_id}")
+            else:
+                logger.warning(f"无法生成用户向量: user_id={user_id}")
+
+        except Exception as e:
+            logger.error(f"刷新用户向量异常: user_id={user_id}, error={e}", exc_info=True)
 
     @classmethod
     def get_instance(cls) -> "RecommendationService":
