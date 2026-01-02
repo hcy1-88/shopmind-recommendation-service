@@ -45,6 +45,6 @@ REM Set PYTHONPATH to include project root
 set PYTHONPATH=%CD%;%PYTHONPATH%
 
 REM Use python -m uvicorn instead of direct uvicorn command
-uv run python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8086
+uv run python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8086 --http h11
 
 pause
