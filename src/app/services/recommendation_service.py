@@ -99,37 +99,32 @@ class RecommendationService:
             # 并行获取用户兴趣、行为历史和搜索关键词
             interests_task = self.user_client.get_user_interests(user_id)
             behaviors_task = self.user_client.get_product_behaviors(user_id, day=self.user_behavior_history)
-            keywords_task = self.user_client.get_search_keywords(user_id, day=self.user_behavior_history)
 
-            interests, interacted_product_ids, search_keywords = await asyncio.gather(
-                interests_task, behaviors_task, keywords_task
+            interests, interacted_product_ids = await asyncio.gather(
+                interests_task, behaviors_task
             )
 
             has_interests = interests and interests.interests
             has_enough_behaviors = len(interacted_product_ids) >= self.min_behavior_count
-            has_search_keywords = len(search_keywords) > 0
 
             logger.info(
                 f"用户数据获取完成: user_id={user_id}, "
                 f"interests_count={len(interests.interests) if has_interests else 0}, "
-                f"behavior_count={len(interacted_product_ids)}, "
-                f"search_keyword_count={len(search_keywords)}",
+                f"behavior_count={len(interacted_product_ids)}, ",
                 extra={
                     "user_id": user_id,
                     "has_interests": has_interests,
                     "has_behaviors": has_enough_behaviors,
-                    "has_keywords": has_search_keywords
                 }
             )
 
             # Step 3: 判断推荐策略 - 有兴趣、足够行为或搜索关键词则进行个性化推荐
-            if has_interests or has_enough_behaviors or has_search_keywords:
+            if has_interests or has_enough_behaviors:
                 # 个性化推荐
                 products = await self._personalized_recommend_with_cache(
                     user_id=user_id,
                     interests=interests.interests if has_interests else None,
                     interacted_product_ids=interacted_product_ids if has_enough_behaviors else None,
-                    search_keywords=search_keywords if has_search_keywords else None,
                     limit=limit
                 )
                 if products:
@@ -161,7 +156,6 @@ class RecommendationService:
         user_id: int,
         interests: Optional[Dict[str, str]] = None,
         interacted_product_ids: Optional[List[int]] = None,
-        search_keywords: Optional[List[str]] = None,
         limit: int = 10
     ) -> List[ProductResponseDto]:
         """
@@ -171,7 +165,6 @@ class RecommendationService:
             user_id: 用户ID
             interests: 用户兴趣标签 (key: 英文code, value: 中文名称)
             interacted_product_ids: 用户已交互的商品ID列表（用于生成基于行为的用户向量）
-            search_keywords: 用户搜索关键词列表
             limit: 推荐数量
 
         Returns:
@@ -187,7 +180,6 @@ class RecommendationService:
                 user_id=user_id,
                 interests=interests,
                 interacted_product_ids=interacted_product_ids,
-                search_keywords=search_keywords
             )
 
             if user_vector is None:
@@ -243,7 +235,6 @@ class RecommendationService:
         user_id: int,
         interests: Optional[Dict[str, str]] = None,
         interacted_product_ids: Optional[List[int]] = None,
-        search_keywords: Optional[List[str]] = None,
     ) -> Optional[np.ndarray]:
         """
         计算用户向量（融合行为、兴趣、搜索关键词）.
@@ -252,7 +243,6 @@ class RecommendationService:
             user_id: 用户ID
             interests: 用户兴趣标签
             interacted_product_ids: 用户已交互的商品ID列表（用于生成基于行为的向量）
-            search_keywords: 用户搜索关键词列表
 
         Returns:
             用户向量（numpy array），如果失败返回 None
@@ -281,15 +271,7 @@ class RecommendationService:
                     strategies_used.append("interest")
                     logger.info(f"使用兴趣生成用户向量: user_id={user_id}, interest_count={len(interests)}")
 
-            # 3. 基于搜索关键词生成向量
-            if search_keywords:
-                keyword_vector = await self._get_user_vector_from_keywords(search_keywords)
-                if keyword_vector is not None:
-                    user_vectors.append(keyword_vector)
-                    strategies_used.append("search")
-                    logger.info(f"使用搜索关键词生成用户向量: user_id={user_id}, keyword_count={len(search_keywords)}, keywords={search_keywords[:5]}")
-
-            # 4. 融合多个向量
+            # 3. 融合多个向量
             if not user_vectors:
                 logger.warning(f"无法生成用户向量: user_id={user_id}")
                 return None
@@ -312,7 +294,6 @@ class RecommendationService:
         user_id: int,
         interests: Optional[Dict[str, str]] = None,
         interacted_product_ids: Optional[List[int]] = None,
-        search_keywords: Optional[List[str]] = None,
         limit: int = 10
     ) -> List[ProductResponseDto]:
         """
@@ -322,7 +303,6 @@ class RecommendationService:
             user_id: 用户ID
             interests: 用户兴趣标签 (key: 英文code, value: 中文名称)
             interacted_product_ids: 用户已交互的商品ID列表（用于生成基于行为的用户向量）
-            search_keywords: 用户搜索关键词列表
             limit: 推荐数量
 
         Returns:
@@ -355,16 +335,8 @@ class RecommendationService:
                     logger.info(
                         f"使用兴趣生成用户向量: user_id={user_id}, interest_count={len(interests)}")
 
-            # 1.3 基于搜索关键词生成向量
-            if search_keywords:
-                keyword_vector = await self._get_user_vector_from_keywords(search_keywords)
-                if keyword_vector is not None:
-                    user_vectors.append(keyword_vector)
-                    strategies_used.append("search")
-                    logger.info(
-                        f"使用搜索关键词生成用户向量: user_id={user_id}, keyword_count={len(search_keywords)}, keywords={search_keywords[:5]}")
 
-            # 1.4 融合多个向量（如果有多个来源）
+            # 1.3 融合多个向量（如果有多个来源）
             if not user_vectors:
                 logger.warning(
                     f"无法生成用户向量: user_id={user_id}")
@@ -854,10 +826,9 @@ class RecommendationService:
             # 获取用户数据
             interests_task = self.user_client.get_user_interests(user_id)
             behaviors_task = self.user_client.get_product_behaviors(user_id, day=self.user_behavior_history)
-            keywords_task = self.user_client.get_search_keywords(user_id, day=self.user_behavior_history)
 
-            interests, interacted_product_ids, search_keywords = await asyncio.gather(
-                interests_task, behaviors_task, keywords_task, return_exceptions=True
+            interests, interacted_product_ids = await asyncio.gather(
+                interests_task, behaviors_task, return_exceptions=True
             )
 
             # 检查是否有异常
@@ -867,16 +838,13 @@ class RecommendationService:
             if isinstance(interacted_product_ids, Exception):
                 logger.error(f"获取用户行为失败: user_id={user_id}, error={interacted_product_ids}")
                 return
-            if isinstance(search_keywords, Exception):
-                logger.error(f"获取搜索关键词失败: user_id={user_id}, error={search_keywords}")
-                return
+
 
             has_interests = interests and interests.interests
             has_enough_behaviors = len(interacted_product_ids) >= self.min_behavior_count
-            has_search_keywords = len(search_keywords) > 0
 
             # 只有当用户有数据时才更新向量
-            if not (has_interests or has_enough_behaviors or has_search_keywords):
+            if not (has_interests or has_enough_behaviors):
                 logger.info(f"用户无有效数据，跳过刷新: user_id={user_id}")
                 return
 
@@ -885,7 +853,6 @@ class RecommendationService:
                 user_id=user_id,
                 interests=interests.interests if has_interests else None,
                 interacted_product_ids=interacted_product_ids if has_enough_behaviors else None,
-                search_keywords=search_keywords if has_search_keywords else None,
             )
 
             if user_vector is not None:

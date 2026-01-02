@@ -162,14 +162,13 @@ class UserServiceClient:
         product_ids = []
         seen = set()
         for behavior in behaviors:
-            try:
+            if not behavior.target_id:
+                continue
+            else:
                 product_id = int(behavior.target_id)
                 if product_id not in seen:
                     product_ids.append(product_id)
                     seen.add(product_id)
-            except (ValueError, TypeError):
-                logger.warning(f"无效的商品ID: {behavior.target_id}")
-                continue
 
         logger.info(f"提取用户商品行为: user_id={user_id}, product_count={len(product_ids)}")
         return product_ids
