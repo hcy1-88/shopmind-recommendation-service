@@ -125,3 +125,51 @@ async def search_products(
             detail=f"搜索服务异常: {str(e)}"
         )
 
+
+@router.get(
+    "/products/recommendations",
+    response_model=ResultContext[List[ProductResponseDto]]
+)
+async def get_recommendations(
+    product_id: int = Query(..., description="商品ID", alias="productId"),
+    limit: int = Query(10, ge=1, le=100, description="推荐数量（1-100）")
+) -> ResultContext[List[ProductResponseDto]]:
+    """
+    根据当前商品获取相似商品推荐（商品详情页"看了又看"/"猜你喜欢"）.
+
+    **功能说明**：
+    - 基于商品向量相似度推荐相关商品
+    - 自动过滤当前商品本身
+    - 按相似度从高到低排序
+
+    **推荐逻辑**：
+    1. 从 Milvus 获取当前商品的向量
+    2. 使用该向量进行相似度搜索
+    3. 过滤掉当前商品和相似度过低的商品
+    4. 返回 Top-N 相似商品
+
+    **适用场景**：
+    - 商品详情页"看了又看"
+    - 商品详情页"相关推荐"
+    - 购物车"搭配推荐"
+    """
+    try:
+        logger.info(f"收到相似商品推荐请求: product_id={product_id}, limit={limit}")
+
+        # 调用推荐服务
+        recommendation_service = get_recommendation_service()
+        similar_products = await recommendation_service.get_similar_products(
+            product_id=product_id,
+            limit=limit
+        )
+
+        logger.info(f"相似商品推荐完成: product_id={product_id}, count={len(similar_products)}")
+
+        return ResultContext.ok(
+            data=similar_products,
+            message="推荐成功"
+        )
+
+    except Exception as e:
+        logger.error(f"获取相似商品异常: product_id={product_id}, error={str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取相似商品异常: {str(e)}")

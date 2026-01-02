@@ -86,7 +86,7 @@ class RecommendationService:
                 # 获取商品详情
                 if filtered_ids:
                     products = await self.product_client.get_products_by_ids(filtered_ids)
-                    id_to_product = {p.id: p for p in products}
+                    id_to_product = {p.id_int: p for p in products}
                     sorted_products = [id_to_product[pid] for pid in filtered_ids if pid in id_to_product]
 
                     if sorted_products:
@@ -228,7 +228,7 @@ class RecommendationService:
 
             # 获取商品详情
             products = await self.product_client.get_products_by_ids(filtered_ids)
-            id_to_product = {p.id: p for p in products}
+            id_to_product = {p.id_int: p for p in products}
             sorted_products = [id_to_product[pid] for pid in filtered_ids if pid in id_to_product]
 
             logger.info(f"个性化推荐完成: user_id={user_id}, count={len(sorted_products)}")
@@ -414,7 +414,7 @@ class RecommendationService:
             products = await self.product_client.get_products_by_ids(filtered_ids)
 
             # Step 5: 按搜索顺序排序（保持相似度顺序）
-            id_to_product = {p.id: p for p in products}
+            id_to_product = {p.id_int: p for p in products}
             sorted_products = [id_to_product[pid] for pid in filtered_ids if pid in id_to_product]
 
             logger.info(
@@ -709,7 +709,7 @@ class RecommendationService:
             products = await self.product_client.get_products_by_ids(page_product_ids)
 
             # Step 7: 按搜索顺序排序
-            id_to_product = {p.id: p for p in products}
+            id_to_product = {p.id_int: p for p in products}
             sorted_products = [id_to_product[pid] for pid in page_product_ids if pid in id_to_product]
 
             logger.info(
@@ -734,6 +734,86 @@ class RecommendationService:
                 page_number=page_number,
                 page_size=page_size
             )
+
+    async def get_similar_products(self, product_id: int, limit: int = 10) -> List[ProductResponseDto]:
+        """
+        根据商品ID获取相似商品推荐.
+
+        Args:
+            product_id: 商品ID
+            limit: 推荐数量
+
+        Returns:
+            相似商品列表
+        """
+        try:
+            logger.info(f"开始获取相似商品: product_id={product_id}, limit={limit}")
+
+            # Step 1: 从 Milvus 获取该商品的向量
+            collection = get_collection()
+            collection.load()
+
+            query_expr = f"product_id == {product_id}"
+            results = collection.query(
+                expr=query_expr,
+                output_fields=["product_id", "embedding"]
+            )
+
+            if not results or len(results) == 0:
+                logger.warning(f"商品向量不存在: product_id={product_id}")
+                return []
+
+            # 获取商品向量（如果有多条取第一条）
+            product_vector = np.array(results[0]["embedding"])
+            logger.info(f"获取商品向量成功: product_id={product_id}, dim={len(product_vector)}")
+
+            # Step 2: 使用商品向量进行相似度搜索
+            search_params = {
+                "metric_type": "COSINE",
+                "params": {"ef": 64}
+            }
+
+            search_results = collection.search(
+                data=[product_vector.tolist()],
+                anns_field="embedding",
+                param=search_params,
+                limit=limit + 10,  # 多取一些，过滤后保证足够数量
+                output_fields=["product_id"]
+            )
+
+            # Step 3: 提取相似商品ID（去重并过滤掉商品自己）
+            similar_product_ids = []
+            seen = set()
+            seen.add(product_id)  # 先把自己加入，避免推荐自己
+
+            if search_results and len(search_results) > 0:
+                for hit in search_results[0]:
+                    pid = hit.entity.get("product_id")
+                    if pid and pid not in seen and hit.distance >= self.min_distance:
+                        similar_product_ids.append(int(pid))
+                        seen.add(int(pid))
+                        if len(similar_product_ids) >= limit:
+                            break
+
+            if not similar_product_ids:
+                logger.warning(f"未找到相似商品: product_id={product_id}")
+                return []
+
+            logger.info(f"找到相似商品: product_id={product_id}, count={len(similar_product_ids)}")
+
+            # Step 4: 批量获取商品详情
+            products = await self.product_client.get_products_by_ids(similar_product_ids)
+
+            # Step 5: 按相似度顺序排序
+            id_to_product = {p.id_int: p for p in products}
+            sorted_products = [id_to_product[pid] for pid in similar_product_ids if pid in id_to_product]
+
+            logger.info(f"相似商品推荐完成: product_id={product_id}, returned={len(sorted_products)}")
+            return sorted_products
+
+        except Exception as e:
+            logger.error(f"获取相似商品异常: product_id={product_id}, error={str(e)}", exc_info=True)
+            return []
 
     async def refresh_user_vectors_task(self):
         """
