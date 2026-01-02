@@ -3,6 +3,13 @@
 # Group: DEFAULT_GROUP
 # 配置格式: YAML
 
+
+# ==================== 说明 ====================
+# 1. 确保 Milvus 中已创建 shopmind 数据库
+# 2. 确保 product_collection 集合已存在并包含商品向量数据
+# 3. 集合字段：
+#    - product_id: INT64 (主键)
+#    - embedding: FLOAT_VECTOR (维度应与 embedding.dimension 一致)
 milvus:
   host: localhost
   port: 19530
@@ -19,11 +26,22 @@ embedding:
     text_model_dim: 1024
     vision_model: tongyi-embedding-vision-plus
     vision_model_dim: 1152
-    api_key: xxxxxxxxxx
-# ==================== 说明 ====================
-# 1. 确保 Milvus 中已创建 shopmind 数据库
-# 2. 确保 product_collection 集合已存在并包含商品向量数据
-# 3. 集合字段：
-#    - product_id: INT64 (主键)
-#    - embedding: FLOAT_VECTOR (维度应与 embedding.dimension 一致)
+    api_key: sk-af3f441d4a1343bfabe5a6395ecacc91
+
+
+recommendation:
+  # 使用行为推荐的最少行为数, 默认 3
+  min_behavior_count: 2
+  # 考虑的用户行为历史天数，默认考虑 30 天的行为历史
+  user_behavior_history: 30
+  # 推荐阈值，相似度低于 0.45 过滤掉
+  min_distance: 0.45
+  # 用户向量的缓存时间，默认 10 分钟
+  vector_cache_ttl: 600
+
+redis:
+  url: "redis://localhost:6379/1"
+  max_connections: 10
+  password: root
+
 
