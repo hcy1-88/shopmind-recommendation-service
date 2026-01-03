@@ -7,7 +7,7 @@
 """
 from typing import List, Optional, Dict
 import httpx
-from envs.my_llm.Lib.http.client import HTTPException
+from fastapi import HTTPException
 
 from app.clients.service_discovery import get_user_service_url
 from app.schemas.user_service_schema import UserInterestsResponseDTO, UserBehaviorRequest, UserBehaviorResponseDTO
@@ -69,7 +69,7 @@ class UserServiceClient:
                 else:
                     logger.error(
                         f"获取用户兴趣失败: url={url}, user_id={user_id}, message={result.message}")
-                    raise HTTPException("获取用户兴趣失败")
+                    raise HTTPException(status_code=500, detail="获取用户兴趣失败")
 
         except httpx.TimeoutException:
             logger.error(f"获取用户兴趣超时: user_id={user_id}")
@@ -130,7 +130,7 @@ class UserServiceClient:
                     return behaviors
                 else:
                     logger.error(f"获取用户行为失败！url={url} , request={request_body.model_dump()}")
-                    raise HTTPException("用户服务获取用户行为异常！")
+                    raise HTTPException(status_code=500, detail="用户服务获取用户行为异常！")
         except httpx.TimeoutException:
             logger.error(f"获取用户行为历史超时: user_id={user_id}")
             raise
