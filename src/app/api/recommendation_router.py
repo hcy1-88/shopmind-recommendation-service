@@ -8,6 +8,7 @@
 from typing import List
 from fastapi import APIRouter, Query, HTTPException
 
+from app.decorators.deprecation_decorator import deprecated
 from app.schemas.recommendation_schema import RecommendationResponse
 from app.schemas.page_result_schema import PageResult
 from app.schemas.product_service_schema import ProductResponseDto
@@ -17,7 +18,7 @@ from app.utils.logger import app_logger as logger
 from app.utils.trace_context import get_trace_id
 
 router = APIRouter(
-    prefix="/recommend",
+    prefix="",
     tags=["Recommendation"],
 )
 
@@ -71,7 +72,7 @@ async def recommend_products(
         )
 
 
-
+@deprecated("搜索接口弃用，搜索功能由商品服务主导")
 @router.get("/products/search", response_model=ResultContext[PageResult])
 async def search_products(
     keyword: str = Query(..., min_length=1, description="搜索关键词"),
