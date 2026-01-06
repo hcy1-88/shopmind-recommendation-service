@@ -878,11 +878,6 @@ class RecommendationService:
         return cls._instance
 
 
-
-# 单例实例
-_recommendation_service: Optional[RecommendationService] = None
-
-
 def get_recommendation_service() -> RecommendationService:
     """获取推荐服务单例."""
     return RecommendationService.get_instance()
