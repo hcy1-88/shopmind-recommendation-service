@@ -250,6 +250,73 @@ class UserServiceClient:
             )
             return []
 
+    async def get_user_behaviors_grouped(
+        self, 
+        user_id: int, 
+        day: int = 30
+    ) -> Dict[str, List[UserBehaviorResponseDTO]]:
+        """
+        获取用户最近的行为，并按行为类型分组.
+        
+        Args:
+            user_id: 用户ID
+            day: 最近多少天
+        
+        Returns:
+            分组的行为字典，例如：
+            {
+                "view": [behavior1, behavior2, ...],
+                "purchase": [behavior3, ...],
+                "search": [behavior4, ...]
+            }
+        """
+        try:
+            # 获取用户所有类型的行为（target_type=product）
+            behaviors = await self.get_user_behaviors(
+                user_id=user_id,
+                day=day,
+                target_type="product"
+            )
+            
+            # 初始化分组
+            grouped = {
+                "view": [],
+                "purchase": [],
+                "search": [],
+                "like": [],
+                "share": [],
+                "add_cart": []
+            }
+            
+            # 按行为类型分组
+            for behavior in behaviors:
+                if behavior.behavior_type in grouped:
+                    grouped[behavior.behavior_type].append(behavior)
+            
+            logger.info(
+                f"获取用户分组行为: user_id={user_id}, "
+                f"view={len(grouped['view'])}, "
+                f"purchase={len(grouped['purchase'])}, "
+                f"search={len(grouped['search'])}, "
+                f"like={len(grouped['like'])}, "
+                f"share={len(grouped['share'])}, "
+                f"add_cart={len(grouped['add_cart'])}"
+            )
+            
+            return grouped
+        
+        except Exception as e:
+            logger.error(f"获取分组行为异常: user_id={user_id}, error={str(e)}", exc_info=True)
+            # 返回空的分组
+            return {
+                "view": [],
+                "purchase": [],
+                "search": [],
+                "like": [],
+                "share": [],
+                "add_cart": []
+            }
+
 
 # 单例实例
 _user_service_client: Optional[UserServiceClient] = None

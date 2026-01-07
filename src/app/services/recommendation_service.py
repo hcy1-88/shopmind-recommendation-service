@@ -19,6 +19,24 @@ from app.utils.logger import app_logger as logger
 from app.config.nacos_client import get_nacos_client
 
 
+BEHAVIOR_TYPE_SURPORTED = ["purchase", "add_cart", "like", "share", "view"]
+# 行为权重配置（按重要性从高到低）
+BEHAVIOR_WEIGHTS = {
+    "purchase": 3.0,   # 购买行为 - 最强的转化信号
+    "add_cart": 2.5,   # 加入购物车 - 强烈的购买意向
+    "like": 2.0,       # 点赞 - 明确的正向反馈
+    "share": 1.5,      # 分享 - 愿意推荐给他人
+    "view": 1.0,       # 浏览 - 基础兴趣信号
+    # 注意：search 行为没有 target_id，只有 search_keyword，会单独处理
+}
+
+# 向量融合权重配置
+VECTOR_FUSION_WEIGHTS = {
+    "behavior": 0.6,  # 行为向量权重（稍高）
+    "interest": 0.4,  # 兴趣向量权重
+}
+
+
 class RecommendationService:
     """推荐服务核心类."""
 
@@ -96,35 +114,50 @@ class RecommendationService:
             # Step 2: 缓存未命中或推荐失败，执行完整推荐流程
             logger.info(f"执行完整推荐流程: user_id={user_id}")
 
-            # 并行获取用户兴趣、行为历史和搜索关键词
+            # 并行获取用户兴趣、分组行为历史和搜索关键词
             interests_task = self.user_client.get_user_interests(user_id)
-            behaviors_task = self.user_client.get_product_behaviors(user_id, day=self.user_behavior_history)
-
-            interests, interacted_product_ids = await asyncio.gather(
-                interests_task, behaviors_task
+            grouped_behaviors_task = self.user_client.get_user_behaviors_grouped(
+                user_id, day=self.user_behavior_history
+            )
+            search_keywords_task = self.user_client.get_search_keywords(
+                user_id, day=self.user_behavior_history
             )
 
+            interests, grouped_behaviors, search_keywords = await asyncio.gather(
+                interests_task, grouped_behaviors_task, search_keywords_task
+            )
+
+            # 计算有效行为数（所有有 target_id 的行为类型）
+            behavior_count = sum(
+                len(grouped_behaviors.get(bt, [])) 
+                for bt in BEHAVIOR_TYPE_SURPORTED
+            )
+            
             has_interests = interests and interests.interests
-            has_enough_behaviors = len(interacted_product_ids) >= self.min_behavior_count
+            has_enough_behaviors = behavior_count >= self.min_behavior_count
+            has_search_keywords = search_keywords and len(search_keywords) > 0
 
             logger.info(
                 f"用户数据获取完成: user_id={user_id}, "
                 f"interests_count={len(interests.interests) if has_interests else 0}, "
-                f"behavior_count={len(interacted_product_ids)}, ",
+                f"behavior_count={behavior_count}, "
+                f"search_keyword_count={len(search_keywords) if has_search_keywords else 0}",
                 extra={
                     "user_id": user_id,
                     "has_interests": has_interests,
                     "has_behaviors": has_enough_behaviors,
+                    "has_search_keywords": has_search_keywords,
                 }
             )
 
             # Step 3: 判断推荐策略 - 有兴趣、足够行为或搜索关键词则进行个性化推荐
-            if has_interests or has_enough_behaviors:
+            if has_interests or has_enough_behaviors or has_search_keywords:
                 # 个性化推荐
                 products = await self._personalized_recommend_with_cache(
                     user_id=user_id,
+                    grouped_behaviors=grouped_behaviors if has_enough_behaviors else None,
                     interests=interests.interests if has_interests else None,
-                    interacted_product_ids=interacted_product_ids if has_enough_behaviors else None,
+                    search_keywords=search_keywords if has_search_keywords else None,
                     limit=limit
                 )
                 if products:
@@ -154,8 +187,9 @@ class RecommendationService:
     async def _personalized_recommend_with_cache(
         self,
         user_id: int,
+        grouped_behaviors: Optional[Dict[str, List]] = None,
         interests: Optional[Dict[str, str]] = None,
-        interacted_product_ids: Optional[List[int]] = None,
+        search_keywords: Optional[List[str]] = None,
         limit: int = 10
     ) -> List[ProductResponseDto]:
         """
@@ -163,8 +197,9 @@ class RecommendationService:
 
         Args:
             user_id: 用户ID
+            grouped_behaviors: 分组的行为数据（view/purchase/search等）
             interests: 用户兴趣标签 (key: 英文code, value: 中文名称)
-            interacted_product_ids: 用户已交互的商品ID列表（用于生成基于行为的用户向量）
+            search_keywords: 用户搜索关键词列表
             limit: 推荐数量
 
         Returns:
@@ -175,11 +210,12 @@ class RecommendationService:
             - 其他行为（view/like/share/add_cart）的商品仍会被推荐
         """
         try:
-            # 生成用户向量
+            # 生成用户向量（融合行为、兴趣、搜索关键词）
             user_vector = await self._compute_user_vector(
                 user_id=user_id,
+                grouped_behaviors=grouped_behaviors,
                 interests=interests,
-                interacted_product_ids=interacted_product_ids,
+                search_keywords=search_keywords,
             )
 
             if user_vector is None:
@@ -233,212 +269,227 @@ class RecommendationService:
     async def _compute_user_vector(
         self,
         user_id: int,
+        grouped_behaviors: Optional[Dict[str, List]] = None,
         interests: Optional[Dict[str, str]] = None,
-        interacted_product_ids: Optional[List[int]] = None,
+        search_keywords: Optional[List[str]] = None,
     ) -> Optional[np.ndarray]:
         """
         计算用户向量（融合行为、兴趣、搜索关键词）.
 
         Args:
             user_id: 用户ID
+            grouped_behaviors: 分组的行为数据（view/purchase/search等）
             interests: 用户兴趣标签
-            interacted_product_ids: 用户已交互的商品ID列表（用于生成基于行为的向量）
+            search_keywords: 用户搜索关键词列表
 
         Returns:
             用户向量（numpy array），如果失败返回 None
             
         Note:
-            interacted_product_ids 包含所有交互行为（view/like/share/add_cart等），
-            用于更全面地理解用户兴趣
+            - 商品行为向量权重 0.6，兴趣向量权重 0.4
+            - 搜索关键词向量会被合并到最终结果中
         """
         try:
-            user_vectors = []
-            strategies_used = []
-
-            # 1. 基于行为生成向量
-            if interacted_product_ids and len(interacted_product_ids) >= self.min_behavior_count:
-                behavior_vector = await self._get_user_vector_from_behaviors(interacted_product_ids)
-                if behavior_vector is not None:
-                    user_vectors.append(behavior_vector)
-                    strategies_used.append("behavior")
-                    logger.info(f"使用行为生成用户向量: user_id={user_id}, behavior_count={len(interacted_product_ids)}")
-
-            # 2. 基于兴趣生成向量
+            # 第一步：生成商品行为向量（加权平均）
+            behavior_vector = None
+            if grouped_behaviors:
+                # 计算有效行为数（所有有 target_id 的行为类型）
+                behavior_count = sum(
+                    len(grouped_behaviors.get(bt, [])) 
+                    for bt in BEHAVIOR_TYPE_SURPORTED
+                )
+                # 如果有足够的行为数，则计算行为向量
+                if behavior_count >= self.min_behavior_count:
+                    behavior_vector = await self._get_user_vector_from_behaviors(grouped_behaviors)
+                    if behavior_vector is not None:
+                        logger.info(f"生成商品行为向量: user_id={user_id}, behavior_count={behavior_count}")
+            
+            # 第二步：生成兴趣向量
+            interest_vector = None
             if interests:
                 interest_vector = await self._get_user_vector_from_interests(interests)
                 if interest_vector is not None:
-                    user_vectors.append(interest_vector)
-                    strategies_used.append("interest")
-                    logger.info(f"使用兴趣生成用户向量: user_id={user_id}, interest_count={len(interests)}")
-
-            # 3. 融合多个向量
-            if not user_vectors:
+                    logger.info(f"生成兴趣向量: user_id={user_id}, interest_count={len(interests)}")
+            
+            # 第三步：生成搜索关键词向量
+            search_vector = None
+            if search_keywords:
+                search_vector = await self._get_user_vector_from_keywords(search_keywords)
+                if search_vector is not None:
+                    logger.info(f"生成搜索关键词向量: user_id={user_id}, keyword_count={len(search_keywords)}")
+            
+            # 第四步：融合向量
+            # 4.1 融合商品行为向量和兴趣向量（行为权重稍高）
+            base_vector = None
+            strategies_used = []
+            
+            if behavior_vector is not None and interest_vector is not None:
+                # 行为向量权重 0.6，兴趣向量权重 0.4
+                base_vector = (
+                    behavior_vector * VECTOR_FUSION_WEIGHTS["behavior"] + 
+                    interest_vector * VECTOR_FUSION_WEIGHTS["interest"]
+                )
+                strategies_used.extend(["behavior", "interest"])
+                logger.info(f"融合行为和兴趣向量: user_id={user_id}")
+            elif behavior_vector is not None:
+                base_vector = behavior_vector
+                strategies_used.append("behavior")
+            elif interest_vector is not None:
+                base_vector = interest_vector
+                strategies_used.append("interest")
+            
+            # 4.2 将搜索向量也纳入融合
+            if base_vector is not None and search_vector is not None:
+                # 搜索向量和基础向量取平均（搜索也很重要）
+                user_vector = np.mean([base_vector, search_vector], axis=0)
+                strategies_used.append("search")
+                logger.info(f"融合搜索向量: user_id={user_id}")
+            elif base_vector is not None:
+                user_vector = base_vector
+            elif search_vector is not None:
+                user_vector = search_vector
+                strategies_used.append("search")
+            else:
                 logger.warning(f"无法生成用户向量: user_id={user_id}")
                 return None
-
-            if len(user_vectors) > 1:
-                user_vector = np.mean(user_vectors, axis=0)
-                strategy_used = "+".join(strategies_used)
-                logger.info(f"融合多个向量: user_id={user_id}, strategies={strategy_used}")
-            else:
-                user_vector = user_vectors[0]
-
+            
+            strategy_used = "+".join(strategies_used)
+            logger.info(f"最终用户向量生成成功: user_id={user_id}, strategies={strategy_used}")
+            
             return user_vector
 
         except Exception as e:
             logger.error(f"计算用户向量异常: user_id={user_id}, error={str(e)}", exc_info=True)
             return None
 
-    async def _personalized_recommend(
-        self,
-        user_id: int,
-        interests: Optional[Dict[str, str]] = None,
-        interacted_product_ids: Optional[List[int]] = None,
-        limit: int = 10
-    ) -> List[ProductResponseDto]:
+    async def _get_user_vector_from_behaviors(
+        self, 
+        grouped_behaviors: Dict[str, List]
+    ) -> Optional[np.ndarray]:
         """
-        个性化推荐（支持基于兴趣、行为或搜索关键词）.
+        根据用户分组的行为，生成用户向量（加权平均）.
 
         Args:
-            user_id: 用户ID
-            interests: 用户兴趣标签 (key: 英文code, value: 中文名称)
-            interacted_product_ids: 用户已交互的商品ID列表（用于生成基于行为的用户向量）
-            limit: 推荐数量
-
-        Returns:
-            推荐商品列表
-            
-        Note:
-            - 只会过滤已购买（purchase）的商品
-            - 其他行为（view/like/share/add_cart）的商品仍会被推荐
-        """
-        try:
-            user_vectors = []
-            strategies_used = []
-
-            # Step 1: 生成用户向量（可能融合多个来源）
-            # 1.1 基于行为生成向量
-            if interacted_product_ids and len(interacted_product_ids) >= self.min_behavior_count:
-                behavior_vector = await self._get_user_vector_from_behaviors(interacted_product_ids)
-                if behavior_vector is not None:
-                    user_vectors.append(behavior_vector)
-                    strategies_used.append("behavior")
-                    logger.info(
-                        f"使用行为生成用户向量: user_id={user_id}, behavior_count={len(interacted_product_ids)}")
-            
-            # 1.2 基于兴趣生成向量
-            if interests:
-                interest_vector = await self._get_user_vector_from_interests(interests)
-                if interest_vector is not None:
-                    user_vectors.append(interest_vector)
-                    strategies_used.append("interest")
-                    logger.info(
-                        f"使用兴趣生成用户向量: user_id={user_id}, interest_count={len(interests)}")
-
-
-            # 1.3 融合多个向量（如果有多个来源）
-            if not user_vectors:
-                logger.warning(
-                    f"无法生成用户向量: user_id={user_id}")
-                return []
-
-            if len(user_vectors) > 1:
-                # 多个向量取平均
-                user_vector = np.mean(user_vectors, axis=0)
-                strategy_used = "+".join(strategies_used)
-                logger.info(
-                    f"融合多个向量: user_id={user_id}, strategies={strategy_used}")
-            else:
-                user_vector = user_vectors[0]
-                strategy_used = strategies_used[0]
-
-            if user_vector is None:
-                logger.warning(
-                    f"无法生成用户向量: user_id={user_id}")
-                return []
-
-            # Step 2: 在 Milvus 中进行向量搜索
-            candidate_product_ids = await self._vector_search(
-                user_vector=user_vector,
-                top_k=limit * 3,  # 多取一些，用于过滤后仍有足够数量
-            )
-
-            if not candidate_product_ids:
-                logger.warning(
-                    f"向量搜索无结果: user_id={user_id}")
-                return []
-
-            # Step 3: 过滤已购买商品
-            purchased_product_ids = await self.user_client.get_purchased_products(user_id)
-            if purchased_product_ids:
-                purchased_set = set(purchased_product_ids)
-                filtered_ids = [pid for pid in candidate_product_ids if pid not in purchased_set][:limit]
-                logger.info(f"过滤已购买商品: user_id={user_id}, purchased_count={len(purchased_product_ids)}")
-            else:
-                filtered_ids = candidate_product_ids[:limit]
-
-            if not filtered_ids:
-                logger.warning(
-                    f"过滤后无推荐商品: user_id={user_id}")
-                return []
-
-            # Step 4: 批量获取商品详情
-            products = await self.product_client.get_products_by_ids(filtered_ids)
-
-            # Step 5: 按搜索顺序排序（保持相似度顺序）
-            id_to_product = {p.id_int: p for p in products}
-            sorted_products = [id_to_product[pid] for pid in filtered_ids if pid in id_to_product]
-
-            logger.info(
-                f"个性化推荐完成: user_id={user_id}, strategy={strategy_used}, count={len(sorted_products)}")
-            return sorted_products
-
-        except Exception as e:
-            logger.error(
-                f"个性化推荐异常: user_id={user_id}, error={str(e)}",
-                exc_info=True
-            )
-            return []
-
-    async def _get_user_vector_from_behaviors(self, product_ids: List[int]) -> Optional[np.ndarray]:
-        """
-        根据用户交互的商品ID，生成用户向量（平均池化）.
-
-        Args:
-            product_ids: 商品ID列表
+            grouped_behaviors: 分组的行为数据，包含所有行为类型：
+                {
+                    "purchase": [behavior1, ...],   # 购买
+                    "add_cart": [behavior2, ...],   # 加入购物车
+                    "like": [behavior3, ...],       # 点赞
+                    "share": [behavior4, ...],      # 分享
+                    "view": [behavior5, ...],       # 浏览
+                    "search": [behavior6, ...],     # 搜索（无 target_id，不处理）
+                }
 
         Returns:
             用户向量（numpy array），如果失败返回 None
+            
+        Note:
+            - search 行为没有 target_id，只有 search_keyword，会在其他地方单独处理
+            - 如果某些行为类型没有数据，会自动跳过
+            - 如果同一商品有多个行为类型，取最大权重
         """
         try:
             collection = get_collection()
             collection.load()
 
-            # 从 Milvus 查询商品向量
-            query_expr = f"product_id in {product_ids}"
+            # 收集所有需要查询的商品ID，以及每种行为类型的统计
+            all_product_ids = set()
+            # 商品行为权重映射，因为 同一个用户对一件商品可能会有多种行为，比如 浏览后收藏、购买，这就是 3 个行为
+            behavior_product_map = {}
+            # {product_id: [(behavior_type, weight), ...]}
+            # behavior_product_map = {
+            #     product_id_A: [
+            #         ("view", 1.0),      # 第一次浏览
+            #         ("like", 2.0),      # 后来点赞
+            #         ("add_cart", 2.5),  # 加入购物车
+            #         ("purchase", 3.0)   # 最终购买
+            #     ],
+            #     product_id_B: [
+            #         ("view", 1.0),      # 浏览
+            #         ("share", 1.5)      # 分享
+            #     ]
+            # }
+
+            behavior_stats = {bt: 0 for bt in BEHAVIOR_WEIGHTS.keys()}  # 统计每种行为的数量
+            
+            # 遍历所有有 target_id 的行为类型
+            for behavior_type in BEHAVIOR_TYPE_SURPORTED:
+                # 如果该行为类型在分组数据中存在
+                if behavior_type in grouped_behaviors and grouped_behaviors[behavior_type]:
+                    for behavior in grouped_behaviors[behavior_type]:
+                        if behavior.target_id:
+                            try:
+                                product_id = int(behavior.target_id)
+                                all_product_ids.add(product_id)
+                                behavior_stats[behavior_type] += 1
+                                
+                                # 记录这个商品的行为类型和权重
+                                if product_id not in behavior_product_map:
+                                    behavior_product_map[product_id] = []
+                                behavior_product_map[product_id].append(
+                                    (behavior_type, BEHAVIOR_WEIGHTS.get(behavior_type, 1.0))
+                                )
+                            except (ValueError, TypeError):
+                                logger.warning(f"无效的 target_id: {behavior.target_id}")
+                                continue
+            
+            # 如果没有任何有效的商品ID，返回 None
+            if not all_product_ids:
+                logger.warning("没有有效的商品ID用于生成用户向量（所有行为类型都为空或无 target_id）")
+                return None
+
+            # 记录用户使用了哪些行为类型
+            used_behaviors = [bt for bt, count in behavior_stats.items() if count > 0]
+            logger.info(
+                f"开始基于行为生成用户向量: "
+                f"total_behaviors={sum(behavior_stats.values())}, "
+                f"unique_products={len(all_product_ids)}, "
+                f"behavior_breakdown={dict((bt, behavior_stats[bt]) for bt in used_behaviors)}"
+            )
+
+            # 从 Milvus 批量查询商品向量
+            query_expr = f"product_id in {list(all_product_ids)}"
             results = collection.query(
                 expr=query_expr,
                 output_fields=["product_id", "embedding"]
             )
 
             if not results:
-                logger.warning(
-                    f"未找到任何商品向量: product_ids={product_ids}")
+                logger.warning(f"未找到任何商品向量: product_ids={list(all_product_ids)}")
                 return None
 
-            # 提取向量并去重（同一个 product_id 只保留一个）
+            # 提取向量并进行加权计算
+            weighted_vectors = []
+            total_weight = 0.0
+            
             product_embeddings = {}
             for item in results:
                 pid = item["product_id"]
                 if pid not in product_embeddings:
                     product_embeddings[pid] = np.array(item["embedding"])
-
-            # 进行平均池化
-            embeddings = list(product_embeddings.values())
-            user_vector = np.mean(embeddings, axis=0)
+            
+            # 对每个商品的向量应用权重
+            for product_id, embedding in product_embeddings.items():
+                if product_id in behavior_product_map:
+                    # 如果同一个商品有多个行为，取最大权重，这样做是为了避免 同一件商品因为存在多个行为而计算多次，提高性能
+                    max_weight = max(weight for _, weight in behavior_product_map[product_id])
+                    weighted_vectors.append(embedding * max_weight)
+                    total_weight += max_weight
+            
+            if not weighted_vectors or total_weight == 0:
+                logger.warning("没有有效的加权向量")
+                return None
+            
+            # 加权平均（100 件商品，就有 100 个加权后的向量，按列求和，total_weight = 100 就是取平均）
+            user_vector = np.sum(weighted_vectors, axis=0) / total_weight
 
             logger.info(
-                f"基于行为生成用户向量: product_count={len(embeddings)}, vector_dim={len(user_vector)}")
+                f"基于行为生成用户向量成功（加权平均）: "
+                f"product_count={len(weighted_vectors)}, "
+                f"total_weight={total_weight:.2f}, "
+                f"vector_dim={len(user_vector)}, "
+                f"used_behaviors={','.join(used_behaviors)}"
+            )
             return user_vector
 
         except Exception as e:
@@ -823,36 +874,52 @@ class RecommendationService:
         try:
             logger.info(f"开始刷新用户向量: user_id={user_id}")
 
-            # 获取用户数据
+            # 获取用户数据（兴趣、分组行为、搜索关键词）
             interests_task = self.user_client.get_user_interests(user_id)
-            behaviors_task = self.user_client.get_product_behaviors(user_id, day=self.user_behavior_history)
+            grouped_behaviors_task = self.user_client.get_user_behaviors_grouped(
+                user_id, day=self.user_behavior_history
+            )
+            search_keywords_task = self.user_client.get_search_keywords(
+                user_id, day=self.user_behavior_history
+            )
 
-            interests, interacted_product_ids = await asyncio.gather(
-                interests_task, behaviors_task, return_exceptions=True
+            interests, grouped_behaviors, search_keywords = await asyncio.gather(
+                interests_task, grouped_behaviors_task, search_keywords_task, 
+                return_exceptions=True
             )
 
             # 检查是否有异常
             if isinstance(interests, Exception):
                 logger.error(f"获取用户兴趣失败: user_id={user_id}, error={interests}")
-                return
-            if isinstance(interacted_product_ids, Exception):
-                logger.error(f"获取用户行为失败: user_id={user_id}, error={interacted_product_ids}")
-                return
+                interests = None
+            if isinstance(grouped_behaviors, Exception):
+                logger.error(f"获取用户行为失败: user_id={user_id}, error={grouped_behaviors}")
+                grouped_behaviors = {}
+            if isinstance(search_keywords, Exception):
+                logger.error(f"获取搜索关键词失败: user_id={user_id}, error={search_keywords}")
+                search_keywords = []
 
+            # 计算有效行为数（所有有 target_id 的行为类型）
+            behavior_count = sum(
+                len(grouped_behaviors.get(bt, [])) 
+                for bt in BEHAVIOR_TYPE_SURPORTED
+            ) if grouped_behaviors else 0
 
             has_interests = interests and interests.interests
-            has_enough_behaviors = len(interacted_product_ids) >= self.min_behavior_count
+            has_enough_behaviors = behavior_count >= self.min_behavior_count
+            has_search_keywords = search_keywords and len(search_keywords) > 0
 
             # 只有当用户有数据时才更新向量
-            if not (has_interests or has_enough_behaviors):
+            if not (has_interests or has_enough_behaviors or has_search_keywords):
                 logger.info(f"用户无有效数据，跳过刷新: user_id={user_id}")
                 return
 
-            # 计算用户向量
+            # 计算用户向量（融合行为、兴趣、搜索关键词）
             user_vector = await self._compute_user_vector(
                 user_id=user_id,
+                grouped_behaviors=grouped_behaviors if has_enough_behaviors else None,
                 interests=interests.interests if has_interests else None,
-                interacted_product_ids=interacted_product_ids if has_enough_behaviors else None,
+                search_keywords=search_keywords if has_search_keywords else None,
             )
 
             if user_vector is not None:
