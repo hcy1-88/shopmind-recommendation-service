@@ -640,6 +640,7 @@ class RecommendationService:
             )
             return []
 
+    @deprecated("搜索接口弃用，搜索功能由商品服务主导")
     async def search_products(
         self,
         keyword: str,

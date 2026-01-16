@@ -12,7 +12,7 @@ from app.utils.logger import app_logger as logger
 
 class SearchService:
     @staticmethod
-    async def search_product_id_by_semantics(keyword: str, limit: int, product_ids: list[int] = None) -> list[int]:
+    async def rerank_product_id_by_semantics(keyword: str, limit: int, product_ids: list[int] = None) -> list[int]:
         """搜索商品"""
         # Step 1: 使用 embedding 服务将关键词转为向量
         search_vector = await get_embedding_service().embed_query(keyword)

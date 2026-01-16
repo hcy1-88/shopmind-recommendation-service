@@ -21,5 +21,5 @@ router = APIRouter(prefix="/semantic", tags=["search semantic for coordinating"]
 )
 async def search_product_id_by_semantics(request: ProductSemanticSearchRequest) -> ResultContext[list[int]]:
     """调用 service 完成接口功能"""
-    ids = await SearchService.search_product_id_by_semantics(request.keyword, request.limit, request.product_ids)
+    ids = await SearchService.rerank_product_id_by_semantics(request.keyword, request.limit, request.product_ids)
     return ResultContext.ok(ids)
