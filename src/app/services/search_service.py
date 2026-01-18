@@ -56,9 +56,11 @@ class SearchService:
         if results and len(results[0]) > 0:
             for hit in results[0]:
                 pid = hit.entity.get("product_id")
+                distance = hit.distance
                 if pid is not None and pid not in seen:
                     seen.add(pid)
                     ranked_ids.append(pid)
+                    logger.info(f"语义排序结果 - product_id: {pid}, distance: {distance:.4f}")
 
         logger.info(f"语义搜索并排序成功，关键词：{keyword}, 语义召回个数：{len(ranked_ids)}")
         return ranked_ids
