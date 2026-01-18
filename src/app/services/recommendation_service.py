@@ -11,6 +11,7 @@ import asyncio
 from app.clients.user_service_client import get_user_service_client
 from app.clients.product_service_client import get_product_service_client
 from app.clients.redis_client import get_redis_client
+from app.decorators.deprecation_decorator import deprecated
 from app.schemas.product_service_schema import ProductResponseDto
 from app.schemas.page_result_schema import PageResult
 from app.services.embedding_service import get_embedding_service
